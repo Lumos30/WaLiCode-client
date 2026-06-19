@@ -1,12 +1,15 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
 import { useFileExplorerStore, formatFileSize } from '../stores/fileExplorerStore'
+import { useAiPatchStore } from '../stores/aiPatchStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 import Editor from '@monaco-editor/react'
 
 export function FileWorkspace() {
   const { colors, currentTheme } = useThemeStore()
-  const { openTabs, activeTabKey, updateFileContent, saveFile, loadMoreContent } = useFileExplorerStore()
+  const { openTabs, activeTabKey, updateFileContent, saveFile, loadMoreContent, restoreFileContent } = useFileExplorerStore()
+  const previews = useAiPatchStore((state) => state.previews)
+  const removePreview = useAiPatchStore((state) => state.removePreview)
   const [hasSelection, setHasSelection] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
   const [useSudo, setUseSudo] = useState(false)
@@ -14,6 +17,12 @@ export function FileWorkspace() {
   const activeTab = useMemo(
     () => openTabs.find((tab) => tab.key === activeTabKey) ?? null,
     [openTabs, activeTabKey],
+  )
+  const activePreview = useMemo(
+    () => activeTab
+      ? previews.find((item) => item.target === 'remote' && item.connectionId === activeTab.connectionId && item.path === activeTab.path) ?? null
+      : null,
+    [previews, activeTab],
   )
 
   // 简单的扩展名推断语言
@@ -178,6 +187,54 @@ export function FileWorkspace() {
                     </>
                   )}
                 </div>
+              </div>
+            )}
+            {activePreview && (
+              <div className="border-b px-3 py-2 text-xs shrink-0" style={{ backgroundColor: `${colors.accent}10`, borderColor: colors.border }}>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div style={{ color: colors.text }}>
+                      AI 已修改当前远程文件，新增 {activePreview.addedLines} 行，删除 {activePreview.removedLines} 行
+                    </div>
+                    <div className="mt-1 truncate" style={{ color: colors.textDim }}>
+                      {activePreview.path}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={async () => {
+                        const success = await restoreFileContent(activePreview.connectionId!, activePreview.path, activePreview.beforeContent)
+                        if (success) {
+                          removePreview(activePreview.id)
+                        }
+                      }}
+                      className="px-2 py-1 rounded text-[11px]"
+                      style={{ backgroundColor: `${colors.red}15`, color: colors.red }}
+                    >
+                      还原
+                    </button>
+                    <button
+                      onClick={() => removePreview(activePreview.id)}
+                      className="px-2 py-1 rounded text-[11px]"
+                      style={{ backgroundColor: colors.accent, color: '#fff' }}
+                    >
+                      接受
+                    </button>
+                  </div>
+                </div>
+                <details className="mt-2">
+                  <summary className="cursor-pointer select-none" style={{ color: colors.textSecondary }}>
+                    查看修改前后
+                  </summary>
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <pre className="text-[11px] p-2 rounded overflow-auto max-h-48" style={{ backgroundColor: colors.bgPrimary, color: colors.text }}>
+                      {activePreview.beforeContent}
+                    </pre>
+                    <pre className="text-[11px] p-2 rounded overflow-auto max-h-48" style={{ backgroundColor: colors.bgPrimary, color: colors.text }}>
+                      {activePreview.afterContent}
+                    </pre>
+                  </div>
+                </details>
               </div>
             )}
             {!activeTab.binary && (

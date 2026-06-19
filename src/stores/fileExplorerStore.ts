@@ -56,6 +56,8 @@ interface FileExplorerStore {
   _preloadCondensedChain: (connectionId: string, dirPath: string) => Promise<void>
   refreshCurrentPath: (connectionId: string) => Promise<void>
   refreshDirectory: (connectionId: string, path: string) => Promise<void>
+  reloadFileByPath: (connectionId: string, path: string) => Promise<string | null>
+  restoreFileContent: (connectionId: string, path: string, content: string) => Promise<boolean>
   setSelectedPath: (connectionId: string, path: string) => void
 
   openFile: (connectionId: string, path: string, name: string) => Promise<void>
@@ -265,6 +267,65 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
 
   refreshDirectory: async (connectionId, path) => {
     await get().navigateToPath(connectionId, path)
+  },
+
+  reloadFileByPath: async (connectionId, path) => {
+    const key = tabKeyOf(connectionId, path)
+    const tab = get().openTabs.find((item) => item.key === key)
+    if (!tab) return null
+
+    const res = await getFileContent(connectionId, path)
+    if (res.code !== '0000' || !res.data) {
+      set((state) => ({
+        openTabs: state.openTabs.map((item) =>
+          item.key === key ? { ...item, loading: false, error: res.info || '读取文件失败' } : item
+        ),
+      }))
+      return null
+    }
+
+    const content = res.data.content || ''
+    set((state) => ({
+      openTabs: state.openTabs.map((item) =>
+        item.key === key
+          ? {
+              ...item,
+              loading: false,
+              content,
+              binary: !!res.data!.binary,
+              truncated: !!res.data!.truncated,
+              modified: false,
+              size: res.data!.size,
+              error: undefined,
+            }
+          : item
+      ),
+    }))
+
+    return content
+  },
+
+  restoreFileContent: async (connectionId, path, content) => {
+    const key = tabKeyOf(connectionId, path)
+    const res = await saveFileContent(connectionId, path, content, false)
+    if (res.code !== '0000') {
+      set((state) => ({
+        openTabs: state.openTabs.map((item) =>
+          item.key === key ? { ...item, error: res.info || '恢复文件失败' } : item
+        ),
+      }))
+      return false
+    }
+
+    set((state) => ({
+      openTabs: state.openTabs.map((item) =>
+        item.key === key
+          ? { ...item, content, loading: false, modified: false, error: undefined }
+          : item
+      ),
+    }))
+
+    return true
   },
 
   setSelectedPath: (connectionId, path) => {

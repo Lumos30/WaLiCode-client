@@ -5,6 +5,7 @@ import { useConnectionStore } from '../stores/connectionStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
+import { useAiPatchStore } from '../stores/aiPatchStore'
 import * as agentApi from '../api/agent'
 import type { AgentMessage } from '../types'
 import type { ReActStep, TaskBreakdownDTO } from '../api/agent'
@@ -16,6 +17,16 @@ const STEP_COLORS: Record<string, string> = {
   thinking: '#f59e0b',
   tool_call: '#8b5cf6',
   result: '#22c55e',
+}
+
+function parseToolResultPayload(raw?: string): Record<string, any> | null {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    const match = raw.match(/"path"\s*:\s*"([^"]+)"/)
+    return match ? { path: match[1] } : null
+  }
 }
 
 function ToolCallView({ step, colors }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
@@ -837,15 +848,55 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
         // 检测文件操作工具完成 → 刷新文件树 + 重载编辑器
         if (step.stepType === 'tool_call' && step.status === 'success' && step.toolName) {
-          const fileWriteTools = ['writeLocalFile', 'createLocalFile', 'deleteLocalFile', 'writeFile']
+          const fileWriteTools = ['writeLocalFile', 'createLocalFile', 'deleteLocalFile', 'writeFile', 'createFile', 'deleteFile']
           if (fileWriteTools.includes(step.toolName)) {
             console.log('[onStep] 文件操作工具完成，刷新文件树和编辑器:', step.toolName)
-            // 刷新本地文件树
+
+            const payload = parseToolResultPayload(step.toolResult)
+            const changedPath = payload?.path as string | undefined
+
+            if (step.toolName === 'writeLocalFile' && changedPath) {
+              const localStore = useLocalFileStore.getState()
+              const targetTab = localStore.openTabs.find((tab) => tab.path === changedPath)
+              const beforeContent = targetTab?.content ?? ''
+              localStore.reloadFileByPath(changedPath).then((afterContent) => {
+                if (afterContent != null && afterContent !== beforeContent) {
+                  useAiPatchStore.getState().upsertPreview({
+                    target: 'local',
+                    path: changedPath,
+                    toolName: step.toolName!,
+                    beforeContent,
+                    afterContent,
+                  })
+                }
+              }).catch(() => {})
+            }
+
+            if (step.toolName === 'writeFile' && changedPath) {
+              const connectionId = activeBinding?.connectionId || currentConnectionId
+              if (connectionId) {
+                const fileStore = useFileExplorerStore.getState()
+                const targetTab = fileStore.openTabs.find((tab) => tab.connectionId === connectionId && tab.path === changedPath)
+                const beforeContent = targetTab?.content ?? ''
+                fileStore.reloadFileByPath(connectionId, changedPath).then((afterContent) => {
+                  if (afterContent != null && afterContent !== beforeContent) {
+                    useAiPatchStore.getState().upsertPreview({
+                      target: 'remote',
+                      path: changedPath,
+                      connectionId,
+                      toolName: step.toolName!,
+                      beforeContent,
+                      afterContent,
+                    })
+                  }
+                }).catch(() => {})
+              }
+            }
+
             const { rootPath, refreshDirectory } = useLocalFileStore.getState()
             if (rootPath) {
               refreshDirectory(rootPath).catch(() => {})
             }
-            // 重载当前活动文件内容
             useLocalFileStore.getState().reloadActiveFile().catch(() => {})
           }
         }
