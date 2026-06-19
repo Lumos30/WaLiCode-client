@@ -6,12 +6,14 @@ import { RightSidebar } from '../components/RightSidebar'
 import { TerminalPanel } from '../components/TerminalPanel'
 import { FileWorkspace } from '../components/FileWorkspace'
 import { SFTPWorkspace } from '../components/SFTPWorkspace'
+import { LocalFileWorkspace } from '../components/LocalFileWorkspace'
 import { Settings } from '../components/Settings'
 import { SSHConnectionModal } from '../components/SSHConnectionModal'
 import { useThemeStore } from '../stores/themeStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
+import { useLocalFileStore } from '../stores/localFileStore'
 
-type TabId = 'servers' | 'files' | 'sftp' | 'extensions'
+type TabId = 'servers' | 'files' | 'sftp' | 'local' | 'extensions'
 
 /**
  * MainView V4 - 统一终端管理 + 多文件标签
@@ -25,7 +27,7 @@ type TabId = 'servers' | 'files' | 'sftp' | 'extensions'
 export function MainView() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sshModalOpen, setSshModalOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState<TabId>('servers')
+  const [activeTab, setActiveTab] = useState<TabId>('local')
   const [sidebarVisible, setSidebarVisible] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(260)
   const [chatVisible, setChatVisible] = useState(true)
@@ -180,6 +182,12 @@ export function MainView() {
         onToggleChat={() => setChatVisible(!chatVisible)}
         chatVisible={chatVisible}
         onOpenSSHModal={() => setSshModalOpen(true)}
+        onOpenLocalFolder={() => {
+          setActiveTab('local')
+          setSidebarVisible(true)
+          // 触发文件夹选择对话框
+          void useLocalFileStore.getState().openFolder()
+        }}
       />
 
       {/* ===== 主体区域 ===== */}
@@ -211,6 +219,13 @@ export function MainView() {
 
         {/* 中间：根据左侧 Tab 切换工作区 */}
         <div className="flex-1 min-w-0 overflow-hidden relative workbench-container">
+          {/* 本地文件夹标签页 - 文件树 + Monaco 编辑器 */}
+          {activeTab === 'local' && (
+            <div className="h-full min-w-0">
+              <LocalFileWorkspace />
+            </div>
+          )}
+
           {/* SSH 服务器标签页 - 只显示终端 */}
           {activeTab === 'servers' && (
             <div className="h-full min-w-0">

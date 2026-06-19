@@ -31,12 +31,15 @@ export interface ChatRequestDTO {
 
 /** 后端 ReAct 事件（ReActEventDTO） */
 export interface ReActEvent {
-  event: 'text' | 'tool_call' | 'tool_result' | 'round_end' | 'done' | 'error'
+  event: 'text' | 'tool_call' | 'tool_result' | 'round_end' | 'done' | 'error' | 'heartbeat' | 'tool_progress'
   content?: string
   toolCallId?: string
   toolName?: string
   status?: string
   fullText?: string
+  args?: string
+  summary?: string
+  timestamp?: number
   stepInfo?: {
     currentStep: number
     maxSteps: number
@@ -136,6 +139,7 @@ export function reactChatStream(
       function read() {
         reader.read().then(({ done, value }) => {
           if (done) {
+            console.log('[SSE stream done], lastFullText=', lastFullText)
             onDone(lastFullText)
             return
           }
@@ -149,8 +153,15 @@ export function reactChatStream(
             const trimmed = line.trim()
             if (!trimmed) continue
 
+            console.log('[SSE recv]', trimmed.substring(0, 200))
+
             try {
               const event: ReActEvent = JSON.parse(trimmed)
+              // 忽略心跳保活事件
+              if (event.event === 'heartbeat') {
+                console.log('[SSE heartbeat]')
+                continue
+              }
               processEvent(event)
             } catch {
               // 非 JSON 行，忽略（可能是 HTTP chunk 边界）
@@ -159,7 +170,14 @@ export function reactChatStream(
           read()
         }).catch((err) => {
           if (err.name !== 'AbortError') {
-            onError(err.message)
+            // 如果已有累积内容，说明是流中途断开（可能是后端处理完但连接关闭）
+// 不显示错误，直接用已有内容触发 onDone
+            if (lastFullText) {
+              console.warn('[SSE stream ended with partial content]', err.message)
+              onDone(lastFullText)
+            } else {
+              onError(err.message)
+            }
           }
         })
       }
@@ -170,6 +188,7 @@ export function reactChatStream(
             // 文本流 → 更新累积文本
             const fullText = event.fullText || event.content || ''
             lastFullText = fullText
+            console.log('[SSE text]', fullText.substring(0, 100))
             onText(fullText)
             break
           }
@@ -218,6 +237,32 @@ export function reactChatStream(
             break
           }
 
+          case 'tool_progress': {
+            // 工具执行实时进度 → 新建/更新步骤
+            if (event.status === 'executing') {
+              // 工具开始执行
+              stepCounter++
+              onStep({
+                stepType: 'tool_call',
+                stepIndex: stepCounter,
+                toolName: event.toolName || 'unknown',
+                toolParams: event.args || '',
+                content: `正在执行 ${event.toolName || 'unknown'}: ${event.args || ''}`,
+                status: 'in_progress',
+              })
+            } else {
+              // 工具执行完成（success/error）
+              onStep({
+                stepType: 'tool_call',
+                stepIndex: stepCounter,
+                toolName: event.toolName || 'unknown',
+                toolResult: event.summary || '',
+                status: event.status === 'success' ? 'success' : 'failure',
+              })
+            }
+            break
+          }
+
           case 'round_end': {
             // 轮次结束 → 发送 thinking 步骤（显示进度）
             const info = event.stepInfo
@@ -244,16 +289,22 @@ export function reactChatStream(
                 finalContent = event.content
               }
             }
-            if (finalContent) {
-              lastFullText = finalContent
-              onText(finalContent)
-              onStep({
-                stepType: 'result',
-                stepIndex: ++stepCounter,
-                content: finalContent,
-                status: 'success',
-              })
+            console.log('[SSE done] finalContent=', finalContent.substring(0, 200))
+            // result 步骤始终携带最终 content，用于渲染
+            const resultStep: ReActStep = {
+              stepType: 'result',
+              stepIndex: ++stepCounter,
+              status: 'success',
             }
+            if (finalContent) {
+              resultStep.content = finalContent
+              // 如果之前没有收到 text 事件（如纯工具调用场景），补充更新
+              if (!lastFullText) {
+                lastFullText = finalContent
+                onText(finalContent)
+              }
+            }
+            onStep(resultStep)
             break
           }
 

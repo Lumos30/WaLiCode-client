@@ -6,8 +6,9 @@ import { SSHConnectionModal } from './SSHConnectionModal'
 import { useFileExplorerStore, formatFileSize } from '../stores/fileExplorerStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 import { getFileContent, createFile, createDirectory, renameFile, deleteFile, downloadFileUrl, uploadFile } from '../api/sshFile'
+import { LocalFileExplorer } from './LocalFileExplorer'
 
-type TabId = 'servers' | 'files' | 'sftp' | 'extensions'
+type TabId = 'servers' | 'files' | 'sftp' | 'local' | 'extensions'
 
 function statusColor(status: number, colors: any): string {
   switch (status) {
@@ -814,8 +815,9 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
   }
 
   const tabLabels: Record<TabId, string> = {
+    local: '本地文件夹',
     servers: 'SSH 服务器',
-    files: '文件目录',
+    files: '远程文件目录',
     sftp: 'SFTP 文件传输',
     extensions: '扩展',
   }
@@ -838,7 +840,9 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {activeTab === 'servers' ? (
+        {activeTab === 'local' ? (
+          <LocalFileExplorer />
+        ) : activeTab === 'servers' ? (
           <div className="p-2">
             {error && (
               <div className="flex items-center justify-between gap-2 px-3 py-2 mb-2 rounded-md text-[11px]" style={{ backgroundColor: `${colors.red}15`, color: colors.red, border: `1px solid ${colors.red}30` }}>

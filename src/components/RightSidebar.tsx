@@ -4,80 +4,148 @@ import { useAgentStore } from '../stores/agentStore'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
+import { useLocalFileStore } from '../stores/localFileStore'
 import * as agentApi from '../api/agent'
 import type { AgentMessage } from '../types'
 import type { ReActStep } from '../api/agent'
 import { ConnectionStatus } from '../types'
 
 // ===== ReAct 步骤渲染 =====
-const STEP_LABELS: Record<string, string> = {
-  thinking: '💭 思考中',
-  tool_call: '⚡ 工具执行',
-  result: '✅ 结果',
-}
-
 const STEP_COLORS: Record<string, string> = {
   thinking: '#f59e0b',
   tool_call: '#8b5cf6',
   result: '#22c55e',
 }
 
-function ReActStepView({ step, colors }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
-  const label = STEP_LABELS[step.stepType] || step.stepType
-  const dotColor = step.status === 'failure' ? '#ef4444' : (STEP_COLORS[step.stepType] || colors.accent)
-
+function ToolCallView({ step, colors }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
+  const [expanded, setExpanded] = useState(false)
+  const isSuccess = step.status === 'success'
+  const isFailure = step.status === 'failure'
+  const statusIcon = isFailure ? '❌' : isSuccess ? '✅' : '⏳'
+  const resultText = step.toolResult || ''
+  const hasResult = resultText.length > 0
   return (
-    <div className="flex gap-2 py-1">
-      <div className="flex flex-col items-center flex-shrink-0 pt-1">
-        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: dotColor }} />
-        {step.stepIndex ? (
-          <div className="w-px flex-1 min-h-[8px]" style={{ backgroundColor: `${colors.border}` }} />
-        ) : null}
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-0.5">
-          <span className="text-[11px] font-medium" style={{ color: dotColor }}>{label}</span>
-          {step.stepIndex && (
-            <span className="text-[10px]" style={{ color: colors.textDim }}>#{step.stepIndex}</span>
-          )}
-        </div>
-        {step.toolName && (
-          <div className="text-[11px] px-2 py-1 rounded mb-0.5" style={{
-            backgroundColor: colors.bgSecondary,
-            border: `1px solid ${colors.border}`,
-            color: colors.accent,
-            fontFamily: 'monospace',
-          }}>
-            {step.toolName}{step.toolParams ? `(${step.toolParams})` : ''}
-          </div>
+    <div className="rounded-lg overflow-hidden" style={{
+      border: `1px solid ${isFailure ? '#ef444440' : `${colors.border}`}`,
+      backgroundColor: colors.bgSecondary,
+    }}>
+      {/* 头部：工具名 + 状态 */}
+      <button
+        onClick={() => hasResult && setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-black/5"
+        style={{ cursor: hasResult ? 'pointer' : 'default' }}
+      >
+        <span className="text-[12px] flex-shrink-0">{statusIcon}</span>
+        <span className="text-[11px] font-mono font-medium flex-shrink-0" style={{ color: colors.accent }}>
+          {step.toolName || '工具'}
+        </span>
+        {step.toolParams && (
+          <span className="text-[10px] font-mono truncate" style={{ color: colors.textDim }}>
+            {step.toolParams}
+          </span>
         )}
-        {step.toolResult && (
-          <pre className="text-[11px] px-2 py-1 rounded mb-0.5 overflow-x-auto" style={{
-            backgroundColor: colors.bgSecondary,
-            border: `1px solid ${colors.border}`,
+        <div className="flex-1" />
+        {hasResult && (
+          <span className="text-[10px] flex-shrink-0" style={{ color: colors.textDim }}>
+            {expanded ? '收起' : `${resultText.length} 字`}
+          </span>
+        )}
+        {hasResult && (
+          <svg className={`w-3 h-3 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        )}
+      </button>
+      {/* 展开内容：工具结果 */}
+      {hasResult && expanded && (
+        <div className="px-3 pb-2 border-t" style={{ borderColor: colors.border }}>
+          <pre className="text-[11px] mt-2 px-2 py-1.5 rounded overflow-x-auto" style={{
+            backgroundColor: colors.bgPrimary,
             color: colors.text,
             fontFamily: 'monospace',
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-all',
+            maxHeight: '300px',
+            overflowY: 'auto',
           }}>
-            {step.toolResult.length > 500 ? step.toolResult.slice(0, 500) + '...' : step.toolResult}
+            {resultText}
           </pre>
-        )}
-        {step.content && step.stepType !== 'result' && (
-          <div className="text-[12px]" style={{ color: colors.textSecondary, whiteSpace: 'pre-wrap' }}>
-            {step.content.length > 300 ? step.content.slice(0, 300) + '...' : step.content}
-          </div>
-        )}
-        {step.error && (
-          <div className="text-[11px] px-2 py-1 rounded" style={{
-            backgroundColor: '#ef444410',
-            border: `1px solid #ef444430`,
-            color: '#ef4444',
-          }}>
-            {step.error}
-          </div>
-        )}
-      </div>
+        </div>
+      )}
+      {/* 错误信息 */}
+      {step.error && (
+        <div className="px-3 pb-2 text-[11px]" style={{ color: '#ef4444' }}>
+          {step.error}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ThinkingStepView({ step, colors }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{
+      backgroundColor: `${STEP_COLORS.thinking}08`,
+      border: `1px solid ${STEP_COLORS.thinking}20`,
+    }}>
+      <span className="text-[11px]" style={{ color: STEP_COLORS.thinking }}>💭</span>
+      <span className="text-[11px]" style={{ color: colors.textSecondary }}>
+        {step.content || '思考中...'}
+      </span>
+    </div>
+  )
+}
+
+function ProcessTimeline({ steps, colors }: { steps: ReActStep[]; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
+  // 过滤掉 result 类型（最终结果单独展示为对话气泡）
+  const processSteps = steps.filter(s => s.stepType !== 'result')
+  if (processSteps.length === 0) return null
+
+  const [collapsed, setCollapsed] = useState(false)
+  const toolCount = processSteps.filter(s => s.stepType === 'tool_call').length
+  const thinkingCount = processSteps.filter(s => s.stepType === 'thinking').length
+
+  return (
+    <div className="mb-1.5">
+      <button
+        onClick={() => setCollapsed(!collapsed)}
+        className="w-full flex items-center gap-2 px-2 py-1 rounded-md transition-colors hover:bg-black/5"
+        style={{ color: colors.textDim }}
+      >
+        <svg className={`w-3 h-3 transition-transform ${collapsed ? '' : 'rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+        <span className="text-[11px]">
+          {collapsed ? '展开' : '收起'}过程
+        </span>
+        <span className="text-[10px]" style={{ opacity: 0.7 }}>
+          {thinkingCount > 0 && `${thinkingCount} 轮思考`}
+          {thinkingCount > 0 && toolCount > 0 && ' · '}
+          {toolCount > 0 && `${toolCount} 次工具`}
+        </span>
+        <div className="flex-1" />
+        <div className="flex gap-0.5">
+          {processSteps.slice(0, 5).map((s, i) => (
+            <div key={i} className="w-1.5 h-1.5 rounded-full" style={{
+              backgroundColor: s.status === 'failure' ? '#ef4444' : STEP_COLORS[s.stepType] || colors.accent,
+            }} />
+          ))}
+          {processSteps.length > 5 && <span className="text-[9px]" style={{ color: colors.textDim }}>+{processSteps.length - 5}</span>}
+        </div>
+      </button>
+      {!collapsed && (
+        <div className="mt-1 space-y-1.5 pl-1">
+          {processSteps.map((step, i) => {
+            if (step.stepType === 'tool_call') {
+              return <ToolCallView key={i} step={step} colors={colors} />
+            }
+            if (step.stepType === 'thinking') {
+              return <ThinkingStepView key={i} step={step} colors={colors} />
+            }
+            return null
+          })}
+        </div>
+      )}
     </div>
   )
 }
@@ -159,38 +227,55 @@ function MessageBubble({ message }: { message: AgentMessage }) {
     return html
   }
 
+  // 对于有 steps 的 assistant 消息，复制按钮应使用最终展示内容
+  const copyText = isUser ? message.content : (message.steps && message.steps.length > 0
+    ? (message.steps.find(s => s.stepType === 'result' && s.content)?.content || message.content || '')
+    : message.content || '')
   const timeStr = formatTime(message.timestamp)
-  const plainText = message.content || ''
   const timeBar = (
     <div className={`flex items-center gap-1.5 mt-1 ${isUser ? 'justify-end' : 'justify-start'}`} style={{ fontSize: '10px', color: colors.textDim }}>
-      {isUser && plainText && <CopyButton text={plainText} isUser={isUser} colors={colors} />}
+      {isUser && copyText && <CopyButton text={copyText} isUser={isUser} colors={colors} />}
       <span>{timeStr}</span>
-      {!isUser && plainText && <CopyButton text={plainText} isUser={false} colors={colors} />}
+      {!isUser && copyText && <CopyButton text={copyText} isUser={false} colors={colors} />}
     </div>
   )
 
   if (message.steps && message.steps.length > 0) {
+    // 分离 result 步骤和过程步骤
+    const resultStep = message.steps.find(s => s.stepType === 'result' && s.content)
+    const hasProcessSteps = message.steps.some(s => s.stepType !== 'result')
+    // 最终展示内容：优先取 result 步骤的 content，其次取 message.content（流式过程中）
+    const displayContent = resultStep?.content || message.content
+
     return (
       <div className="px-4 py-1.5 flex justify-start">
-        <div className="flex flex-col items-start">
-          <div className="max-w-[88%] rounded-lg border" style={{
-            backgroundColor: colors.bgTertiary,
-            borderColor: colors.border,
-            borderRadius: '12px 12px 12px 2px',
-          }}>
-            <div className="px-3 pt-2 pb-2">
-              {message.steps.map((step, i) => (
-                <ReActStepView key={i} step={step} colors={colors} />
-              ))}
-              {message.content && (
-                <div className="mt-1 pt-1" style={{ borderTop: `1px solid ${colors.border}` }}>
-                  <div className="text-[12px] leading-relaxed" style={{ color: colors.text, whiteSpace: 'pre-wrap' }}
-                    dangerouslySetInnerHTML={{ __html: formatMarkdown(message.content) }}
-                  />
-                </div>
-              )}
+        <div className="flex flex-col items-start max-w-[88%]">
+          {/* 过程时间线（可折叠） */}
+          {hasProcessSteps && (
+            <ProcessTimeline steps={message.steps} colors={colors} />
+          )}
+          {/* AI 回复内容（独立对话气泡） */}
+          {displayContent && (
+            <div
+              className="px-3.5 py-2.5 text-[13px] leading-relaxed"
+              style={{
+                backgroundColor: colors.bgTertiary,
+                color: colors.text,
+                borderRadius: '12px 12px 12px 2px',
+              }}
+              dangerouslySetInnerHTML={{ __html: formatMarkdown(displayContent) }}
+            />
+          )}
+          {/* 流式加载指示器 */}
+          {!displayContent && !resultStep && (
+            <div className="px-3.5 py-2.5 flex items-center gap-2" style={{ backgroundColor: colors.bgTertiary, borderRadius: '12px 12px 12px 2px' }}>
+              <div className="flex gap-1">
+                {[0, 150, 300].map((delay) => (
+                  <span key={delay} className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: `pulse-dot 1.4s ${delay}ms infinite ease-in-out both` }} />
+                ))}
+              </div>
             </div>
-          </div>
+          )}
           {timeBar}
         </div>
       </div>
@@ -264,7 +349,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     bindTerminal,
     inputTags,
     removeInputTag,
-    clearInputTags,
     getInputTagsContent,
   } = useSshAgentStore()
 
@@ -452,6 +536,21 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   }
 
   const handleAddCurrentFile = () => {
+    // 先检查本地文件
+    const localTab = useLocalFileStore.getState().openTabs.find(
+      (t) => t.key === useLocalFileStore.getState().activeTabKey
+    )
+    if (localTab && localTab.content) {
+      insertTagAtCursor({
+        id: `file_${Date.now()}`,
+        label: `文件: ${localTab.name}`,
+        fullContent: `本地文件: ${localTab.path}\n\n\`\`\`\n${localTab.content}\n\`\`\``,
+        type: 'file',
+      })
+      setShowAttachmentMenu(false)
+      return
+    }
+    // 远程文件
     if (!activeTabKey) return
     const tab = openTabs.find(t => t.key === activeTabKey)
     if (!tab || !tab.content) return
@@ -488,10 +587,22 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       const selection = editor.getSelection()
       const text = editor.getModel()?.getValueInRange(selection)
       if (text) {
+        // 检查是本地文件还是远程文件
+        const localTab = useLocalFileStore.getState().openTabs.find(
+          (t) => t.key === useLocalFileStore.getState().activeTabKey
+        )
+        const remoteTab = useFileExplorerStore.getState().openTabs.find(
+          (t) => t.key === useFileExplorerStore.getState().activeTabKey
+        )
+        
+        const filePath = localTab?.path || remoteTab?.path || 'unknown'
+        const fileName = localTab?.name || remoteTab?.name || 'unknown'
+        const prefix = localTab ? '本地文件' : '远程文件'
+        
         insertTagAtCursor({
           id: `sel_${Date.now()}`,
-          label: '选中文本',
-          fullContent: `选中的代码/文本:\n\`\`\`\n${text}\n\`\`\``,
+          label: `选中: ${fileName}`,
+          fullContent: `${prefix}: ${filePath}\n选中的代码/文本:\n\`\`\`\n${text}\n\`\`\``,
           type: 'terminal-selection',
         })
       }
@@ -508,7 +619,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     if (!currentSessionId) {
       await createServerSession(currentAgentId)
     }
-    const sessionId = currentSessionId!
+    const sessionId = useAgentStore.getState().currentSessionId
+    if (!sessionId) return
 
     let messageContent = plainText
     let displayContent = domHtml
@@ -526,7 +638,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         return `> 📎 **${tag.label}**\n> ${preview}`
       }).join('\n>\n')
       displayContent = plainText ? `${plainText}\n\n${displayTags}` : displayTags
-      clearInputTags()
+      // 不再 clearInputTags() — 标签作为持久上下文保留，用户手动删除才算移除
     }
 
     const selectedConn = activeBinding
@@ -550,9 +662,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     setInputText('')
     setLoading(true)
 
-    inputRef.current.innerHTML = ''
-    inputHtmlRef.current = ''
-    setInputKey((k) => k + 1)
+    // 只清空文字内容，保留文件标签（持久上下文）
+    if (inputRef.current) {
+      const tagsHtml = inputTags.map(tag => buildContextSpanHtml(tag)).join('')
+      inputRef.current.innerHTML = tagsHtml + (tagsHtml ? '&nbsp;' : '')
+      inputHtmlRef.current = inputRef.current.innerHTML
+      setInputKey((k) => k + 1)
+    }
 
     let assistantId = `msg_${Date.now() + 1}`
     const assistantMessage: AgentMessage = {
@@ -573,14 +689,32 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       sessionId,
       messageContent,
       (step: ReActStep) => {
+        console.log('[onStep]', step.stepType, step.content?.substring(0, 80))
         steps.push(step)
         updateMessageSteps(sessionId, assistantId, steps)
+
+        // 检测文件操作工具完成 → 刷新文件树 + 重载编辑器
+        if (step.stepType === 'tool_call' && step.status === 'success' && step.toolName) {
+          const fileWriteTools = ['writeLocalFile', 'createLocalFile', 'deleteLocalFile', 'writeFile']
+          if (fileWriteTools.includes(step.toolName)) {
+            console.log('[onStep] 文件操作工具完成，刷新文件树和编辑器:', step.toolName)
+            // 刷新本地文件树
+            const { rootPath, refreshDirectory } = useLocalFileStore.getState()
+            if (rootPath) {
+              refreshDirectory(rootPath).catch(() => {})
+            }
+            // 重载当前活动文件内容
+            useLocalFileStore.getState().reloadActiveFile().catch(() => {})
+          }
+        }
       },
       (fullText: string) => {
+        console.log('[onText]', fullText.substring(0, 80))
         fullContent = fullText
         updateMessage(sessionId, assistantId, fullContent)
       },
       (finalContent: string) => {
+        console.log('[onDone] finalContent=', finalContent?.substring(0, 80))
         if (finalContent) {
           fullContent = finalContent
           updateMessage(sessionId, assistantId, fullContent)

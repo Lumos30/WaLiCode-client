@@ -1,5 +1,6 @@
 import { useThemeStore } from '../stores/themeStore'
 import { useConnectionStore } from '../stores/connectionStore'
+import { useLocalFileStore } from '../stores/localFileStore'
 
 interface HeaderProps {
   onToggleSidebar: () => void
@@ -9,12 +10,14 @@ interface HeaderProps {
   onToggleChat: () => void
   chatVisible: boolean
   onOpenSSHModal: () => void
+  onOpenLocalFolder: () => void
 }
 
-export function Header({ onToggleSidebar, sidebarVisible, onToggleTerminal, terminalVisible, onToggleChat, chatVisible, onOpenSSHModal }: HeaderProps) {
+export function Header({ onToggleSidebar, sidebarVisible, onToggleTerminal, terminalVisible, onToggleChat, chatVisible, onOpenSSHModal, onOpenLocalFolder }: HeaderProps) {
   const { colors } = useThemeStore()
   const { connections, currentConnectionId } = useConnectionStore()
   const currentConn = connections.find(c => c.id === currentConnectionId)
+  const { rootPath } = useLocalFileStore()
 
   return (
     <div
@@ -55,6 +58,24 @@ export function Header({ onToggleSidebar, sidebarVisible, onToggleTerminal, term
             <line x1="5" y1="12" x2="19" y2="12"></line>
           </svg>
           <span className="text-[12px] leading-none">添加连接（SSH）</span>
+        </button>
+
+        {/* 打开本地文件夹按钮 */}
+        <button
+          onClick={onOpenLocalFolder}
+          className="flex items-center gap-1.5 h-[22px] pl-1.5 pr-2 rounded transition-all duration-150"
+          style={{
+            backgroundColor: rootPath ? `${colors.accent}18` : 'transparent',
+            color: rootPath ? colors.accent : colors.textSecondary,
+          }}
+          onMouseEnter={(e) => { if (!rootPath) { e.currentTarget.style.backgroundColor = `${colors.accent}18`; e.currentTarget.style.color = colors.accent } }}
+          onMouseLeave={(e) => { if (!rootPath) { e.currentTarget.style.backgroundColor = 'transparent'; e.currentTarget.style.color = colors.textSecondary } }}
+          title="打开本地文件夹"
+        >
+          <svg className="w-[13px] h-[13px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+          </svg>
+          <span className="text-[12px] leading-none">{rootPath ? rootPath.split('/').pop() : '打开文件夹'}</span>
         </button>
 
         {/* 连接信息 */}

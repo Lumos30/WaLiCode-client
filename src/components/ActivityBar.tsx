@@ -1,6 +1,6 @@
 import { useThemeStore } from '../stores/themeStore'
 
-type TabId = 'servers' | 'files' | 'sftp' | 'extensions'
+type TabId = 'servers' | 'files' | 'sftp' | 'local' | 'extensions'
 
 interface ActivityBarProps {
   activeTab: TabId
@@ -9,6 +9,16 @@ interface ActivityBarProps {
 }
 
 const tabs: { id: TabId; icon: React.ReactElement; label: string }[] = [
+  {
+    id: 'local',
+    label: '本地文件夹',
+    icon: (
+      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"></path>
+        <rect x="8" y="13" width="8" height="5" rx="1" fill="currentColor" fillOpacity="0.3" stroke="none"></rect>
+      </svg>
+    ),
+  },
   {
     id: 'servers',
     label: 'SSH 服务器',
@@ -22,10 +32,11 @@ const tabs: { id: TabId; icon: React.ReactElement; label: string }[] = [
   },
   {
     id: 'files',
-    label: '文件目录',
+    label: '远程文件目录',
     icon: (
       <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        <path d="M12 11v6M9 14l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"></path>
       </svg>
     ),
   },
