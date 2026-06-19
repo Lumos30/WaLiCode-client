@@ -735,21 +735,257 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
     )
   }
 
+// ============================================================
+// Java 源码路径关键字检测（对齐 xfg-studio 参考实现）
+// ============================================================
+
+/** Maven/Gradle 标准源码集 scope */
+const JAVA_SOURCE_SCOPES = ['main', 'test', 'integrationTest', 'it', 'e2e']
+
+/** Java 关键字目录名集合（这些名字在 src 下不参与压缩） */
+const JAVA_KEYWORD_NAMES = new Set(['src', 'java', ...JAVA_SOURCE_SCOPES])
+
+/**
+ * 从路径中提取目录名段。
+ * /home/user/project/src/main/java/cn → ['home', 'user', 'project', 'src', 'main', 'java', 'cn']
+ */
+const getPathSegments = (dirPath: string): string[] => {
+  return dirPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+}
+
+/**
+ * 检测路径中是否包含 /src/{scope}/java 模式，返回匹配到的 scope 索引位置。
+ * 返回值：java 段在 segments 数组中的索引，未找到返回 -1
+ */
+const findJavaSourcePattern = (segments: string[]): number => {
+  for (let i = 0; i <= segments.length - 3; i++) {
+    if (segments[i] === 'src' &&
+        JAVA_SOURCE_SCOPES.includes(segments[i + 1]) &&
+        segments[i + 2] === 'java') {
+      return i + 2 // java 的索引
+    }
+  }
+  return -1
+}
+
+/**
+ * 检测目录是否是 Java 源码关键字目录（src/main/java 中的三层）。
+ * 使用路径段匹配而非 endsWith，更可靠。
+ *
+ * 关键字目录 = src、{scope}、java 三层（当它们出现在 src/scope/java 模式中时）
+ */
+const isJavaSourceKeyword = (dirPath: string, dirName: string): boolean => {
+  if (!JAVA_KEYWORD_NAMES.has(dirName)) return false
+  const segments = getPathSegments(dirPath)
+  if (segments.length === 0) return false
+  // 当前目录名必须与路径最后一段匹配
+  if (segments[segments.length - 1] !== dirName) return false
+  // 查找 src/{scope}/java 模式
+  const javaIdx = findJavaSourcePattern(segments)
+  if (javaIdx === -1) return false
+  // 当前目录必须是 src、scope 或 java 之一
+  const srcIdx = javaIdx - 2
+  const scopeIdx = javaIdx - 1
+  if (dirName === 'src' && segments.length - 1 === srcIdx) return true
+  if (JAVA_SOURCE_SCOPES.includes(dirName) && segments.length - 1 === scopeIdx) return true
+  if (dirName === 'java' && segments.length - 1 === javaIdx) return true
+  return false
+}
+
+/**
+ * 检测目录是否处于 src/{scope}/java 结构内部（即 java 之后的用户包路径）。
+ * 用于判断是否应该启用包名压缩。
+ */
+const isInsideJavaSourcePath = (dirPath: string): boolean => {
+  const segments = getPathSegments(dirPath)
+  const javaIdx = findJavaSourcePattern(segments)
+  if (javaIdx === -1) return false
+  // 当前目录必须在 java 之后（深度 > javaIdx + 1）
+  return segments.length > javaIdx + 1
+}
+
+/**
+ * 将目录名中的包路径片段规范化。
+ * 兼容后端或中间层已经把目录名折叠成 "cn/bugstack" 的情况，统一按段处理。
+ */
+const getPackageNameSegments = (name: string): string[] => {
+  return name
+    .split(/[\\/]+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+}
+
+/** Java 包路径展示统一使用点号，而不是斜线。 */
+const formatJavaPackageDisplayName = (name: string): string => {
+  const segments = getPackageNameSegments(name)
+  return segments.length > 0 ? segments.join('.') : name
+}
+
+// ============================================================
+// 压缩节点类型定义
+// ============================================================
+
+interface CondensedNode {
+  type: 'condensed'
+  segments: string[]       // 压缩路径段如 ['cn', 'bugstack', 'ai', 'domain']
+  leafPath: string         // 叶子目录物理路径
+  leafName: string         // 叶子目录名
+  displayName: string      // 显示名如 "cn.bugstack.ai.domain"
+  path: string             // 操作用路径（取叶子）
+  name: string             // 同 displayName
+  directory: true
+  size: null
+  modifiedAt: null
+  __mergedChain?: FileNode[]  // 原始链（兼容旧逻辑）
+}
+
+/** 判断节点是否为压缩节点 */
+const isCondensedNode = (node: any): node is CondensedNode =>
+  node && typeof node === 'object' && 'type' in node && node.type === 'condensed'
+
+// ============================================================
+// 包名压缩核心函数
+// ============================================================
+
+/**
+ * 从已加载的子节点中构建压缩节点。
+ * 规则（对齐 xfg-studio）：
+ * 1. src/main/java 等关键字目录 → 不压缩
+ * 2. 只有在 java 路径内部才启用压缩
+ * 3. 单子目录 + 无文件 → 继续递归压缩
+ * 4. 有文件或多个子目录 → 停止压缩
+ *
+ * @param startNode 起始节点（必须是目录）
+ * @param connectionId 连接ID
+ * @returns CondensedNode 或 null（不符合压缩条件）
+ */
+function buildCondensedNode(
+  startNode: FileNode,
+  connectionId: string
+): CondensedNode | null {
+  // 规则1：Java 关键字目录不压缩
+  if (isJavaSourceKeyword(startNode.path, startNode.name)) {
+    return null
+  }
+
+  // 规则2：只有在 java 源码路径内部才启用压缩
+  if (!isInsideJavaSourcePath(startNode.path)) {
+    return null
+  }
+
+  const segments: string[] = getPackageNameSegments(startNode.name)
+  const chain: FileNode[] = [startNode]
+  let currentPath = startNode.path
+
+  // 向下递归收集单子目录链
+  while (true) {
+    const children = childrenByConnection[connectionId]?.[currentPath]
+    if (!children || children.length === 0) break
+
+    const subDirs = children.filter(c => c.directory)
+    const files = children.filter(c => !c.directory)
+
+    // 有文件 → 停止压缩
+    if (files.length > 0) break
+
+    // 多个子目录或没有子目录 → 停止
+    if (subDirs.length !== 1) break
+
+    const subDir = subDirs[0]
+
+    // 子目录是 Java 关键字 → 停止
+    if (isJavaSourceKeyword(subDir.path, subDir.name)) break
+
+    // 收集段并继续
+    segments.push(...getPackageNameSegments(subDir.name))
+    chain.push(subDir)
+    currentPath = subDir.path
+  }
+
+  // 至少需要2段才有压缩意义
+  if (segments.length < 2) return null
+
+  const displayName = segments.join('.')
+
+  return {
+    type: 'condensed',
+    segments,
+    leafPath: currentPath,
+    leafName: segments[segments.length - 1],
+    displayName,
+    path: currentPath,
+    name: displayName,
+    directory: true,
+    size: null,
+    modifiedAt: null,
+    __mergedChain: chain,
+  }
+}
+
+/**
+ * 对一层子节点应用包名压缩。
+ * 遍历 rawNodes，对符合条件的目录尝试 buildCondensedNode。
+ */
+function applyCondensedMerge(
+  rawNodes: FileNode[],
+  _parentPath: string,
+  connectionId: string
+): (FileNode | CondensedNode)[] {
+  const result: (FileNode | CondensedNode)[] = []
+
+  for (const node of rawNodes) {
+    if (!node.directory) {
+      result.push(node)
+      continue
+    }
+
+    const condensed = buildCondensedNode(node, connectionId)
+    if (condensed) {
+      result.push(condensed)
+    } else {
+      result.push(node)
+    }
+  }
+
+  return result
+}
+
   const renderRemoteTree = (connectionId: string, path: string, depth = 0) => {
-    const nodes = childrenByConnection[connectionId]?.[path] || []
+    const rawNodes = childrenByConnection[connectionId]?.[path] || []
+    // 对 Java 包路径做智能合并（仅在 src/main/java 内部启用）
+    const nodes: (FileNode | CondensedNode)[] = applyCondensedMerge(rawNodes, path, connectionId)
     const expanded = expandedByConnection[connectionId] || []
     const loadingPaths = loadingPathsByConnection[connectionId] || []
 
-    return nodes.map((node: FileNode) => {
-      const isExpanded = expanded.includes(node.path)
-      const isPathLoading = loadingPaths.includes(node.path)
-      const childLoaded = !!childrenByConnection[connectionId]?.[node.path]
+    return nodes.map((node: FileNode | CondensedNode) => {
+      const condensed = isCondensedNode(node)
+      const chain = condensed ? (node as any).__mergedChain : undefined
+      // condensed alias: true = this is a compressed package path node
+      void (condensed)
+      // 压缩节点：检查 leafPath 或链中任一节点是否展开
+      const isExpanded = condensed
+        ? expanded.includes((node as CondensedNode).leafPath) ||
+          (chain && (chain as FileNode[]).some((n: FileNode) => expanded.includes(n.path)))
+        : expanded.includes(node.path)
+      // 压缩节点的加载状态
+      const isPathLoading = condensed
+        ? (chain && (chain as FileNode[]).some((n: FileNode) => loadingPaths.includes(n.path)))
+        : loadingPaths.includes(node.path)
+      // 压缩节点的子节点：用 leafPath 查找
+      const childLoaded = condensed
+        ? !!childrenByConnection[connectionId]?.[(node as CondensedNode).leafPath]
+        : !!childrenByConnection[connectionId]?.[node.path]
       const canExpand = node.directory
       
       const isHidden = node.name.startsWith('.')
       const isActive = !node.directory && `${connectionId}:${node.path}` === activeTabKey
       const isSelected = node.directory && selectedPath === node.path
       const hiddenColor = '#b8860b'
+      const displayLabel = condensed
+        ? (node as CondensedNode).displayName
+        : node.directory && isInsideJavaSourcePath(node.path)
+          ? formatJavaPackageDisplayName(node.name)
+          : node.name
 
       return (
         <div key={`${connectionId}:${node.path}`}>
@@ -766,19 +1002,25 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
             onContextMenu={(e) => handleContextMenu(e, node, connectionId, path)}
             onDragOver={(e) => handleDragOver(e, node, path)}
             onDragLeave={handleDragLeave}
-            onDrop={(e) => handleDrop(e, node, connectionId, path)}
-            title={node.path}
+            onDrop={(e) => handleDrop(e, node as FileNode, connectionId, path)}
+            title={condensed ? (node as CondensedNode).leafPath : node.path}
           >
             <div className="flex items-center gap-1.5 flex-1 min-w-0" onClick={() => {
               if (node.directory) {
-                setSelectedPath(connectionId, node.path)
-                void toggleDirectory(connectionId, node.path)
+                setSelectedPath(connectionId, condensed ? (node as CondensedNode).leafPath : node.path)
+                if (condensed) {
+                  // 压缩节点：展开 leafPath
+                  void toggleDirectory(connectionId, (node as CondensedNode).leafPath)
+                } else {
+                  void toggleDirectory(connectionId, node.path)
+                }
               } else {
                 void openFile(connectionId, node.path, node.name)
               }
             }}>
-              {canExpand && (
-                <span className="text-[10px] w-3 flex items-center justify-center" style={{ color: isHidden ? hiddenColor : colors.textDim }}>
+              {/* 展开/折叠箭头 — 目录显示，文件用等宽占位保持对齐 */}
+              {canExpand ? (
+                <span className="text-[10px] w-3 flex items-center justify-center shrink-0" style={{ color: isHidden ? hiddenColor : colors.textDim }}>
                   {isPathLoading ? (
                     <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M23 4v6h-6M1 20v-6h6" />
@@ -790,6 +1032,8 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
                     </svg>
                   )}
                 </span>
+              ) : (
+                <span className="w-3 shrink-0" />  /* 文件占位，与目录箭头等宽对齐 */
               )}
               <svg className="w-4 h-4 shrink-0" style={{ color: node.directory ? (isHidden ? hiddenColor : colors.accent) : (isActive ? colors.accent : (isHidden ? hiddenColor : colors.textDim)) }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 {node.directory ? (
@@ -798,7 +1042,7 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
                   <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></>
                 )}
               </svg>
-              <span className={`truncate ${isActive || isSelected ? 'font-medium' : ''}`}>{node.name}</span>
+              <span className={`truncate ${isActive || isSelected ? 'font-medium' : ''}`}>{displayLabel}</span>
             </div>
             
             <button className="opacity-0 group-hover:opacity-100 flex-shrink-0 w-5 h-5 flex items-center justify-center rounded hover:bg-black/20" style={{ color: colors.textDim }} title="添加到 AI 对话" onClick={(e) => { e.stopPropagation(); handleAddContext(connectionId, node) }}>
@@ -808,7 +1052,8 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
               </svg>
             </button>
           </div>
-          {node.directory && isExpanded && childLoaded && renderRemoteTree(connectionId, node.path, depth + 1)}
+          {/* 压缩节点：使用 leafPath 渲染子树 */}
+          {node.directory && isExpanded && childLoaded && renderRemoteTree(connectionId, condensed ? (node as CondensedNode).leafPath : node.path, depth + 1)}
         </div>
       )
     })

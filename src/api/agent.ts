@@ -31,7 +31,7 @@ export interface ChatRequestDTO {
 
 /** 后端 ReAct 事件（ReActEventDTO） */
 export interface ReActEvent {
-  event: 'text' | 'tool_call' | 'tool_result' | 'round_end' | 'done' | 'error' | 'heartbeat' | 'tool_progress'
+  event: 'text' | 'tool_call' | 'tool_result' | 'round_end' | 'done' | 'error' | 'heartbeat' | 'tool_progress' | 'task_breakdown' | 'task_progress' | 'sub_agent_call' | 'sub_agent_result'
   content?: string
   toolCallId?: string
   toolName?: string
@@ -46,6 +46,42 @@ export interface ReActEvent {
     shouldContinue: boolean
     totalToolCalls: number
   }
+  taskBreakdown?: TaskBreakdownDTO
+  taskProgress?: {
+    subTaskIndex: number
+    subTaskTitle: string
+    status: string
+    totalSubTasks: number
+    completedSubTasks: number
+  }
+  subAgent?: SubAgentInfo
+}
+
+/** 子代理调用信息 */
+export interface SubAgentInfo {
+  agentName: string
+  task: string
+  status: 'running' | 'success' | 'error'
+  result?: string
+  durationMs?: number
+}
+
+/** 任务拆解 DTO */
+export interface TaskBreakdownDTO {
+  originalRequest: string
+  subTasks: TaskSubTask[]
+  needConfirmation: boolean
+  summary: string
+}
+
+/** 子任务 */
+export interface TaskSubTask {
+  index: number
+  title: string
+  description: string
+  expectedTools: string
+  status: 'pending' | 'executing' | 'completed' | 'failed' | 'skipped'
+  result?: string
 }
 
 /** 前端 ReAct 步骤（用于 UI 渲染） */
@@ -106,6 +142,9 @@ export function reactChatStream(
   onDone: (finalContent: string) => void,
   onError: (err: string) => void,
   terminalSessionId?: string | null,
+  onTaskBreakdown?: (breakdown: TaskBreakdownDTO) => void,
+  onTaskProgress?: (progress: { subTaskIndex: number; subTaskTitle: string; status: string; totalSubTasks: number; completedSubTasks: number }) => void,
+  onSubAgent?: (info: SubAgentInfo) => void,
 ): () => void {
   const baseUrl = getBaseUrl()
   const url = `${baseUrl}/api/v1/chat_stream`
@@ -315,6 +354,55 @@ export function reactChatStream(
               stepIndex: ++stepCounter,
               error: event.content || '未知错误',
               status: 'failure',
+            })
+            break
+          }
+
+          case 'task_breakdown': {
+            // 任务拆解提案
+            if (event.taskBreakdown && onTaskBreakdown) {
+              onTaskBreakdown(event.taskBreakdown)
+            }
+            break
+          }
+
+          case 'task_progress': {
+            // 子任务进度
+            if (event.taskProgress && onTaskProgress) {
+              onTaskProgress(event.taskProgress)
+            }
+            break
+          }
+
+          case 'sub_agent_call': {
+            // 子代理调用开始
+            if (event.subAgent && onSubAgent) {
+              onSubAgent(event.subAgent)
+            }
+            // 同时作为 tool_call 步骤显示（用 🤖 前缀区分子代理）
+            stepCounter++
+            const subIdx = stepCounter
+            onStep({
+              stepType: 'tool_call',
+              stepIndex: subIdx,
+              toolName: `🤖 ${event.subAgent?.agentName || 'sub-agent'}`,
+              content: `委派子代理 ${event.subAgent?.agentName || ''}: ${event.subAgent?.task || ''}`,
+              status: 'in_progress',
+            })
+            break
+          }
+
+          case 'sub_agent_result': {
+            // 子代理执行完成
+            if (event.subAgent && onSubAgent) {
+              onSubAgent(event.subAgent)
+            }
+            // 更新最近的子代理步骤状态
+            onStep({
+              stepType: 'tool_call',
+              stepIndex: stepCounter,
+              toolResult: event.subAgent?.result || '',
+              status: event.subAgent?.status === 'error' ? 'failure' : 'success',
             })
             break
           }

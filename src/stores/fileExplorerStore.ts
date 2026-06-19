@@ -53,6 +53,7 @@ interface FileExplorerStore {
   switchConnection: (connectionId: string) => Promise<void>
   navigateToPath: (connectionId: string, path: string) => Promise<void>
   toggleDirectory: (connectionId: string, path: string) => Promise<void>
+  _preloadCondensedChain: (connectionId: string, dirPath: string) => Promise<void>
   refreshCurrentPath: (connectionId: string) => Promise<void>
   refreshDirectory: (connectionId: string, path: string) => Promise<void>
   setSelectedPath: (connectionId: string, path: string) => void
@@ -158,6 +159,43 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     })
   },
 
+  /**
+   * 递归预加载 Java 源码路径中的单子目录链。
+   * 仅在 src/{scope}/java 内部触发，遇到多子目录/有文件/关键字目录时停止。
+   * 目的：让 buildCondensedNode 能在首次展开时就拿到深层 children 数据。
+   */
+  _preloadCondensedChain: async (connectionId: string, dirPath: string): Promise<void> => {
+    const { childrenByConnection } = get()
+    const children = childrenByConnection[connectionId]?.[dirPath]
+    if (!children || children.length === 0) return
+
+    const subDirs = children.filter(c => c.directory)
+    const files = children.filter(c => !c.directory)
+    // 有文件 或 多个子目录 → 不需要继续预加载
+    if (files.length > 0 || subDirs.length !== 1) return
+
+    const onlyChild = subDirs[0]
+    // 已经加载过 → 递归检查下一层
+    if (childrenByConnection[connectionId]?.[onlyChild.path]) {
+      await get()._preloadCondensedChain(connectionId, onlyChild.path)
+      return
+    }
+
+    // 加载下一层
+    const res = await getFileTree(connectionId, onlyChild.path)
+    if (res.code === '0000' && res.data) {
+      set((state) => {
+        const connectionChildren = { ...(state.childrenByConnection[connectionId] || {}) }
+        connectionChildren[onlyChild.path] = res.data!.items
+        return {
+          childrenByConnection: { ...state.childrenByConnection, [connectionId]: connectionChildren },
+        }
+      })
+      // 递归预加载
+      await get()._preloadCondensedChain(connectionId, onlyChild.path)
+    }
+  },
+
   toggleDirectory: async (connectionId, path) => {
     const loadingPaths = get().loadingPathsByConnection[connectionId] || []
     if (loadingPaths.includes(path)) {
@@ -205,6 +243,9 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
             },
           }
         })
+
+        // Java 源码路径：递归预加载单子目录链，让包名压缩在首次展开时就生效
+        await get()._preloadCondensedChain(connectionId, path)
       } else {
         set((state) => ({
           loadingPathsByConnection: {

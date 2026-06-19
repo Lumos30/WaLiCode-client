@@ -88,6 +88,28 @@ body {
   50% { opacity: 1; transform: scale(1); }
 }
 
+/* 工具调用进度条脉冲动画 */
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ProcessTimeline 展开动画 */
+@keyframes slide-in-from-top {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-in {
+  animation: slide-in-from-top 0.2s ease-out;
+}
+
 /* 选中文本 */
 ::selection {
   background: rgba(79, 138, 245, 0.35);

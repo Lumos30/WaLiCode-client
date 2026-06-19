@@ -30,6 +30,10 @@ interface AgentStore {
   updateMessage: (sessionId: string, messageId: string, content: string) => void
   // 更新消息的 ReAct 步骤
   updateMessageSteps: (sessionId: string, messageId: string, steps: ReActStep[]) => void
+  // 更新消息的任务拆解
+  updateMessageTaskBreakdown: (sessionId: string, messageId: string, breakdown: import('../api/agent').TaskBreakdownDTO) => void
+  // 更新子任务状态
+  updateSubTaskStatus: (sessionId: string, messageId: string, subTaskIndex: number, status: string, result?: string) => void
   // 设置输入框内容
   setInputText: (text: string) => void
   // 设置加载状态
@@ -113,6 +117,40 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         const messages = session.messages.map((m) =>
           m.id === messageId ? { ...m, steps: [...steps] } : m
         )
+        sessions.set(sessionId, { ...session, messages })
+      }
+      return { sessions }
+    }),
+
+  updateMessageTaskBreakdown: (sessionId, messageId, breakdown) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        const messages = session.messages.map((m) =>
+          m.id === messageId ? { ...m, taskBreakdown: breakdown } : m
+        )
+        sessions.set(sessionId, { ...session, messages })
+      }
+      return { sessions }
+    }),
+
+  updateSubTaskStatus: (sessionId, messageId, subTaskIndex, status, result) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        const messages = session.messages.map((m) => {
+          if (m.id !== messageId || !m.taskBreakdown) return m
+          const updatedBreakdown = {
+            ...m.taskBreakdown,
+            subTasks: m.taskBreakdown.subTasks.map((st) => {
+              if (st.index !== subTaskIndex) return st
+              return { ...st, status: status as any, result: result ?? st.result }
+            }),
+          }
+          return { ...m, taskBreakdown: updatedBreakdown }
+        })
         sessions.set(sessionId, { ...session, messages })
       }
       return { sessions }

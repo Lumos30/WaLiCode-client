@@ -23,6 +23,8 @@ export interface AgentMessage {
   timestamp: number
   /** ReAct 步骤列表（React 模式下有值） */
   steps?: ReActStep[]
+  /** 任务拆解方案（task_breakdown 事件触发时设置） */
+  taskBreakdown?: import('../api/agent').TaskBreakdownDTO
 }
 
 // Agent 会话

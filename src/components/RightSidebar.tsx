@@ -7,8 +7,9 @@ import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import * as agentApi from '../api/agent'
 import type { AgentMessage } from '../types'
-import type { ReActStep } from '../api/agent'
+import type { ReActStep, TaskBreakdownDTO } from '../api/agent'
 import { ConnectionStatus } from '../types'
+import { TaskBreakdownCard } from './TaskBreakdownCard'
 
 // ===== ReAct 步骤渲染 =====
 const STEP_COLORS: Record<string, string> = {
@@ -21,52 +22,69 @@ function ToolCallView({ step, colors }: { step: ReActStep; colors: ReturnType<ty
   const [expanded, setExpanded] = useState(false)
   const isSuccess = step.status === 'success'
   const isFailure = step.status === 'failure'
-  const statusIcon = isFailure ? '❌' : isSuccess ? '✅' : '⏳'
+  const isInProgress = step.status === 'in_progress'
+  // 检测是否为子代理调用
+  const isSubAgent = step.toolName?.startsWith('🤖')
+  // Cursor 风格图标：沙漏(执行中) / 绿勾(成功) / 红叉(失败) / 🤖(子代理)
+  const statusIcon = isSubAgent
+    ? (<span className="text-sm flex-shrink-0">🤖</span>)
+    : isFailure
+    ? (<svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="#ef4444"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6" stroke="#fff" strokeWidth="2" strokeLinecap="round"/></svg>)
+    : isSuccess
+      ? (<svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="#22c55e"><circle cx="12" cy="12" r="10"/><polyline points="8 12 11 15 16 10" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>)
+      : (<svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="2s" repeatCount="indefinite"/></svg>)
   const resultText = step.toolResult || ''
   const hasResult = resultText.length > 0
   return (
-    <div className="rounded-lg overflow-hidden" style={{
-      border: `1px solid ${isFailure ? '#ef444440' : `${colors.border}`}`,
+    <div className={`rounded-lg overflow-hidden transition-opacity ${isInProgress ? 'opacity-80' : ''}`} style={{
+      border: `1px solid ${isFailure ? '#ef444440' : isInProgress ? `${colors.accent}30` : `${colors.border}`}`,
       backgroundColor: colors.bgSecondary,
     }}>
-      {/* 头部：工具名 + 状态 */}
+      {/* 头部：工具名 + 状态 — Cursor 风格紧凑布局 */}
       <button
         onClick={() => hasResult && setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-black/5"
+        className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-black/5"
         style={{ cursor: hasResult ? 'pointer' : 'default' }}
       >
-        <span className="text-[12px] flex-shrink-0">{statusIcon}</span>
-        <span className="text-[11px] font-mono font-medium flex-shrink-0" style={{ color: colors.accent }}>
+        {statusIcon}
+        <span className="text-[12px] font-mono font-semibold flex-shrink-0" style={{ color: isSubAgent ? '#8b5cf6' : colors.accent }}>
           {step.toolName || '工具'}
         </span>
         {step.toolParams && (
-          <span className="text-[10px] font-mono truncate" style={{ color: colors.textDim }}>
-            {step.toolParams}
+          <span className="text-[11px] font-mono truncate flex-1 min-w-0" style={{ color: colors.textDim }}>
+            {step.toolParams.length > 60 ? step.toolParams.substring(0, 60) + '...' : step.toolParams}
           </span>
         )}
-        <div className="flex-1" />
-        {hasResult && (
+        {!step.toolParams && <div className="flex-1" />}
+        {isInProgress && (
+          <span className="text-[10px] flex-shrink-0 px-1.5 py-0.5 rounded-full animate-pulse" style={{
+            backgroundColor: isSubAgent ? '#8b5cf615' : `${STEP_COLORS.tool_call}15`,
+            color: isSubAgent ? '#8b5cf6' : STEP_COLORS.tool_call,
+          }}>{isSubAgent ? '子代理运行中' : '执行中'}</span>
+        )}
+        {hasResult && !isInProgress && (
           <span className="text-[10px] flex-shrink-0" style={{ color: colors.textDim }}>
-            {expanded ? '收起' : `${resultText.length} 字`}
+            {expanded ? '收起' : `${resultText.length} 字节`}
           </span>
         )}
         {hasResult && (
-          <svg className={`w-3 h-3 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <svg className={`w-3.5 h-3.5 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <polyline points="6 9 12 15 18 9" />
           </svg>
         )}
       </button>
       {/* 展开内容：工具结果 */}
       {hasResult && expanded && (
-        <div className="px-3 pb-2 border-t" style={{ borderColor: colors.border }}>
-          <pre className="text-[11px] mt-2 px-2 py-1.5 rounded overflow-x-auto" style={{
+        <div className="px-3 pb-2.5 border-t" style={{ borderColor: colors.border }}>
+          <pre className="text-[11px] mt-2 px-2.5 py-2 rounded-md overflow-x-auto leading-relaxed" style={{
             backgroundColor: colors.bgPrimary,
             color: colors.text,
-            fontFamily: 'monospace',
+            fontFamily: '"SF Mono", "JetBrains Mono", "Fira Code", monospace',
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-all',
-            maxHeight: '300px',
+            maxHeight: '320px',
             overflowY: 'auto',
+            lineHeight: '1.5',
           }}>
             {resultText}
           </pre>
@@ -74,7 +92,10 @@ function ToolCallView({ step, colors }: { step: ReActStep; colors: ReturnType<ty
       )}
       {/* 错误信息 */}
       {step.error && (
-        <div className="px-3 pb-2 text-[11px]" style={{ color: '#ef4444' }}>
+        <div className="px-3 pb-2 text-[11px] flex items-start gap-1.5" style={{ color: '#ef4444' }}>
+          <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
           {step.error}
         </div>
       )}
@@ -88,7 +109,10 @@ function ThinkingStepView({ step, colors }: { step: ReActStep; colors: ReturnTyp
       backgroundColor: `${STEP_COLORS.thinking}08`,
       border: `1px solid ${STEP_COLORS.thinking}20`,
     }}>
-      <span className="text-[11px]" style={{ color: STEP_COLORS.thinking }}>💭</span>
+      <svg className="w-3.5 h-3.5 flex-shrink-0 animate-pulse" style={{ color: STEP_COLORS.thinking }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"/>
+        <path d="M9 21h6"/>
+      </svg>
       <span className="text-[11px]" style={{ color: colors.textSecondary }}>
         {step.content || '思考中...'}
       </span>
@@ -96,45 +120,120 @@ function ThinkingStepView({ step, colors }: { step: ReActStep; colors: ReturnTyp
   )
 }
 
-function ProcessTimeline({ steps, colors }: { steps: ReActStep[]; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
+/**
+ * ProcessTimeline — Cursor 风格工具调用折叠面板
+ *
+ * 核心特性：
+ * 1. 进度条动画（执行中显示红色进度条，完成后变绿）
+ * 2. 对话结束后自动折叠（所有步骤都完成时默认折叠）
+ * 3. 折叠头显示统计（N 次工具）+ 状态圆点预览
+ * 4. 展开后每个工具调用独立卡片，带状态图标
+ */
+function ProcessTimeline({ steps, colors, isStreaming, isLoading }: { 
+  steps: ReActStep[]; 
+  colors: ReturnType<typeof useThemeStore.getState>['colors']; 
+  isStreaming?: boolean;
+  isLoading?: boolean;
+}) {
   // 过滤掉 result 类型（最终结果单独展示为对话气泡）
   const processSteps = steps.filter(s => s.stepType !== 'result')
   if (processSteps.length === 0) return null
 
-  const [collapsed, setCollapsed] = useState(false)
+  // 判断是否全部完成（无 in_progress 状态的步骤）
+  const allDone = processSteps.every(s => s.status !== 'in_progress')
+  // 默认行为：流式输出时展开，全部完成后自动折叠
+  const [collapsed, setCollapsed] = useState(() => !isStreaming)
+  
+  // 当流式结束或加载状态变为 false 时自动折叠
+  useEffect(() => {
+    const shouldAutoCollapse = allDone && !isStreaming && !isLoading && !collapsed
+    if (shouldAutoCollapse) {
+      // 延迟 1.5s 自动折叠，让用户看到完成状态
+      const timer = setTimeout(() => setCollapsed(true), 1500)
+      return () => clearTimeout(timer)
+    }
+  }, [allDone, isStreaming, isLoading, collapsed])
+  
+  // 流式开始时自动展开
+  useEffect(() => {
+    if ((isStreaming || isLoading) && collapsed) {
+      setCollapsed(false)
+    }
+  }, [isStreaming, isLoading])
+
   const toolCount = processSteps.filter(s => s.stepType === 'tool_call').length
   const thinkingCount = processSteps.filter(s => s.stepType === 'thinking').length
+  const successCount = processSteps.filter(s => s.status === 'success').length
+  const failCount = processSteps.filter(s => s.status === 'failure').length
+  const progressPercent = processSteps.length > 0 
+    ? Math.round((successCount + failCount) / processSteps.length * 100) 
+    : 100
+  // 进度条颜色：执行中红/橙，完成绿
+  const progressColor = allDone 
+    ? (failCount > 0 ? '#ef4444' : '#22c55e')
+    : '#ef4444'
 
   return (
-    <div className="mb-1.5">
+    <div className="mb-2 rounded-lg overflow-hidden" style={{
+      border: `1px solid ${colors.border}40`,
+      backgroundColor: `${colors.bgSecondary}60`,
+    }}>
+      {/* ===== 折叠头（始终可见）===== */}
       <button
         onClick={() => setCollapsed(!collapsed)}
-        className="w-full flex items-center gap-2 px-2 py-1 rounded-md transition-colors hover:bg-black/5"
+        className="w-full flex items-center gap-2 px-3 py-2 transition-colors hover:bg-black/5"
         style={{ color: colors.textDim }}
       >
-        <svg className={`w-3 h-3 transition-transform ${collapsed ? '' : 'rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <polyline points="9 18 15 12 9 6" />
+        {/* 展开/收起箭头 */}
+        <svg className={`w-3.5 h-3.5 transition-transform duration-200 flex-shrink-0 ${collapsed ? 'rotate-0' : '-rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="6 9 12 15 18 9" />
         </svg>
-        <span className="text-[11px]">
-          {collapsed ? '展开' : '收起'}过程
+        
+        {/* 文字标签 */}
+        <span className="text-[11px] font-medium select-none">
+          {collapsed ? '展开过程' : '收起过程'}
         </span>
-        <span className="text-[10px]" style={{ opacity: 0.7 }}>
-          {thinkingCount > 0 && `${thinkingCount} 轮思考`}
-          {thinkingCount > 0 && toolCount > 0 && ' · '}
+        
+        {/* 统计数字 */}
+        <span className="text-[11px] font-medium tabular-nums" style={{ color: colors.textSecondary }}>
           {toolCount > 0 && `${toolCount} 次工具`}
+          {thinkingCount > 0 && toolCount > 0 && ' · '}
+          {thinkingCount > 0 && `${thinkingCount} 轮思考`}
         </span>
+        
         <div className="flex-1" />
-        <div className="flex gap-0.5">
-          {processSteps.slice(0, 5).map((s, i) => (
-            <div key={i} className="w-1.5 h-1.5 rounded-full" style={{
-              backgroundColor: s.status === 'failure' ? '#ef4444' : STEP_COLORS[s.stepType] || colors.accent,
+        
+        {/* 状态圆点预览（最多显示 6 个） */}
+        <div className="flex gap-1 items-center">
+          {processSteps.slice(0, 6).map((s, i) => (
+            <div key={i} className="w-1.5 h-1.5 rounded-full transition-colors" style={{
+              backgroundColor: s.status === 'failure' ? '#ef4444'
+                : s.status === 'success' ? '#22c55e'
+                : STEP_COLORS[s.stepType] || colors.accent,
             }} />
           ))}
-          {processSteps.length > 5 && <span className="text-[9px]" style={{ color: colors.textDim }}>+{processSteps.length - 5}</span>}
+          {processSteps.length > 6 && (
+            <span className="text-[9px] ml-0.5" style={{ color: colors.textDim }}>+{processSteps.length - 6}</span>
+          )}
         </div>
       </button>
+
+      {/* ===== 进度条（折叠头下方，类似截图中的红色横条）===== */}
+      <div className="h-0.5 w-full overflow-hidden" style={{ backgroundColor: `${colors.border}30` }}>
+        <div 
+          className="h-full transition-all duration-500 ease-out"
+          style={{ 
+            width: `${progressPercent}%`, 
+            backgroundColor: progressColor,
+            // 执行中时带脉冲动画
+            animation: allDone ? 'none' : 'progress-pulse 1.5s ease-in-out infinite',
+          }} 
+        />
+      </div>
+
+      {/* ===== 展开内容：工具调用列表 ===== */}
       {!collapsed && (
-        <div className="mt-1 space-y-1.5 pl-1">
+        <div className="px-2 pb-2 space-y-1.5 animate-in slide-in-from-top-1 duration-200">
           {processSteps.map((step, i) => {
             if (step.stepType === 'tool_call') {
               return <ToolCallView key={i} step={step} colors={colors} />
@@ -207,6 +306,7 @@ function CopyButton({ text, isUser, colors }: { text: string; isUser: boolean; c
 
 function MessageBubble({ message }: { message: AgentMessage }) {
   const { colors } = useThemeStore()
+  const { isLoading } = useAgentStore()
   const isUser = message.role === 'user'
 
   const formatMarkdown = (text: string): string => {
@@ -214,16 +314,46 @@ function MessageBubble({ message }: { message: AgentMessage }) {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
+
+    // 1. 分割线 --- / *** / ___
+    html = html.replace(/^(?:---|\*{3}|_{3})\s*$/gm,
+      `<hr style="border:none;border-top:1px solid ${colors.border}40;margin:8px 0;" />`)
+
+    // 2. 标题 ## / ### / #### （必须在其他规则之前）
+    html = html.replace(/^#### (.+)$/gm, '<h4 style="font-size:12px;font-weight:600;color:${colors.text};margin:10px 0 4px;">$1</h4>')
+    html = html.replace(/^### (.+)$/gm, '<h3 style="font-size:13px;font-weight:600;color:${colors.text};margin:12px 0 5px;">$1</h3>')
+    html = html.replace(/^## (.+)$/gm, '<h2 style="font-size:14px;font-weight:600;color:${colors.text};margin:14px 0 6px;">$1</h2>')
+    html = html.replace(/^# (.+)$/gm, '<h1 style="font-size:16px;font-weight:700;color:${colors.text};margin:16px 0 6px;">$1</h1>')
+
+    // 3. 代码块（必须在行内代码之前，避免被误匹配）
+    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, _lang, code) => {
+      return `<pre style="margin:6px 0;padding:10px;border-radius:6px;overflow-x:auto;font-size:11px;font-family:'JetBrains Mono',monospace;background:${colors.bgSecondary};color:${colors.text};border:1px solid ${colors.border}"><code>${code.trim()}</code></pre>`
+    })
+
+    // 4. 引用块 >
     html = html.replace(/^>\s?(.*)(?:\n>\s?(.*))*/gm, (match) => {
       const content = match.replace(/^>\s?/gm, '')
       return `<blockquote style="border-left: 3px solid ${colors.accent}; margin: 4px 0; padding-left: 8px; color: ${colors.textDim}; background: ${colors.bgSecondary}80; padding-top: 4px; padding-bottom: 4px; border-radius: 0 4px 4px 0;">${content}</blockquote>`
     })
-    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, _lang, code) => {
-      return `<pre style="margin:6px 0;padding:10px;border-radius:6px;overflow-x:auto;font-size:11px;font-family:'JetBrains Mono',monospace;background:${colors.bgSecondary};color:${colors.text};border:1px solid ${colors.border}"><code>${code.trim()}</code></pre>`
-    })
+
+    // 5. 无序列表 - item / * item
+    html = html.replace(/^[ 	]*[-*+] (.+)$/gm, '<li style="margin-left:16px;list-style-type:disc;color:${colors.text};line-height:1.6;">$1</li>')
+
+    // 6. 有序列表 1. item
+    html = html.replace(/^[ \t]*\d+\. (.+)$/gm, '<li style="margin-left:16px;list-style-type:decimal;color:${colors.text};line-height:1.6;">$1</li>')
+
+    // 7. 行内代码
     html = html.replace(/`([^`]+)`/g, `<code style="padding:1px 5px;border-radius:3px;font-size:11px;font-family:monospace;background:${colors.bgHover};color:${colors.accent};border:1px solid ${colors.border}">$1</code>`)
+
+    // 8. 粗体
     html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+
+    // 9. 斜体
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+
+    // 10. 换行（最后执行）
     html = html.replace(/\n/g, '<br/>')
+
     return html
   }
 
@@ -250,9 +380,18 @@ function MessageBubble({ message }: { message: AgentMessage }) {
     return (
       <div className="px-4 py-1.5 flex justify-start">
         <div className="flex flex-col items-start max-w-[88%]">
-          {/* 过程时间线（可折叠） */}
+          {/* 任务拆解卡片 */}
+          {message.taskBreakdown && message.taskBreakdown.subTasks && message.taskBreakdown.subTasks.length > 0 && (
+            <TaskBreakdownCard breakdown={message.taskBreakdown} />
+          )}
+          {/* 过程时间线（Cursor 风格可折叠面板） */}
           {hasProcessSteps && (
-            <ProcessTimeline steps={message.steps} colors={colors} />
+            <ProcessTimeline 
+              steps={message.steps} 
+              colors={colors} 
+              isStreaming={!resultStep && message.content === ''}
+              isLoading={isLoading} 
+            />
           )}
           {/* AI 回复内容（独立对话气泡） */}
           {displayContent && (
@@ -333,6 +472,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     addMessage,
     updateMessage,
     updateMessageSteps,
+    updateMessageTaskBreakdown,
+    updateSubTaskStatus,
     isLoading,
     setLoading,
     newConversation,
@@ -729,7 +870,21 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         abortRef.current = null
         setLoading(false)
       },
-      activeTerminalSessionId || undefined
+      activeTerminalSessionId || undefined,
+      // onTaskBreakdown: 展示任务拆解卡片
+      (breakdown: TaskBreakdownDTO) => {
+        console.log('[onTaskBreakdown]', breakdown.summary, breakdown.subTasks?.length)
+        updateMessageTaskBreakdown(sessionId, assistantId, breakdown)
+      },
+      // onTaskProgress: 更新子任务状态
+      (progress) => {
+        console.log('[onTaskProgress]', progress.subTaskIndex, progress.status)
+        updateSubTaskStatus(sessionId, assistantId, progress.subTaskIndex, progress.status)
+      },
+      // onSubAgent: 子代理调用/结果（日志记录，UI 在 steps 中展示）
+      (subAgentInfo) => {
+        console.log('[onSubAgent]', subAgentInfo.agentName, subAgentInfo.status, subAgentInfo.task || subAgentInfo.result || '')
+      },
     )
   }
 
