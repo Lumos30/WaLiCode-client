@@ -350,6 +350,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     inputTags,
     removeInputTag,
     getInputTagsContent,
+    clearInputTags,
   } = useSshAgentStore()
 
   useEffect(() => {
@@ -638,7 +639,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         return `> 📎 **${tag.label}**\n> ${preview}`
       }).join('\n>\n')
       displayContent = plainText ? `${plainText}\n\n${displayTags}` : displayTags
-      // 不再 clearInputTags() — 标签作为持久上下文保留，用户手动删除才算移除
+      // 发送后清空文件标签，避免残留
     }
 
     const selectedConn = activeBinding
@@ -662,11 +663,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     setInputText('')
     setLoading(true)
 
-    // 只清空文字内容，保留文件标签（持久上下文）
+    // 清空输入框内容（包括文件标签）
+    clearInputTags()
     if (inputRef.current) {
-      const tagsHtml = inputTags.map(tag => buildContextSpanHtml(tag)).join('')
-      inputRef.current.innerHTML = tagsHtml + (tagsHtml ? '&nbsp;' : '')
-      inputHtmlRef.current = inputRef.current.innerHTML
+      inputRef.current.innerHTML = ''
+      inputHtmlRef.current = ''
       setInputKey((k) => k + 1)
     }
 
