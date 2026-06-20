@@ -16,11 +16,11 @@ export function CodeEditor() {
           height="100%"
           defaultLanguage="javascript"
           theme="vs-dark"
-          defaultValue={`// WaLiSSH Code Editor
+          defaultValue={`// WaLiCode Code Editor
 // 使用 AI Agent 协助编写代码
 
 function hello() {
-  console.log("Hello from WaLiSSH!");
+  console.log("Hello from WaLiCode!");
 }
 `}
           options={{

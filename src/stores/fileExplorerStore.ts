@@ -30,6 +30,8 @@ export interface OpenFileTab {
   error?: string
   modified?: boolean
   size?: number
+  /** 每次外部（AI）重载内容时递增，用于强制 Monaco Editor 刷新 */
+  contentVersion?: number
 }
 
 interface FileExplorerStore {
@@ -297,6 +299,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
               modified: false,
               size: res.data!.size,
               error: undefined,
+              contentVersion: (item.contentVersion ?? 0) + 1,
             }
           : item
       ),

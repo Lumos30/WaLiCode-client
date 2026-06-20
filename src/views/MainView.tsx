@@ -3,7 +3,7 @@ import { Header } from '../components/Header'
 import { ActivityBar } from '../components/ActivityBar'
 import { LeftSidebar } from '../components/LeftSidebar'
 import { RightSidebar } from '../components/RightSidebar'
-import { TerminalPanel } from '../components/TerminalPanel'
+import { TerminalContainer } from '../components/TerminalContainer'
 import { SFTPWorkspace } from '../components/SFTPWorkspace'
 import { Settings } from '../components/Settings'
 import { SSHConnectionModal } from '../components/SSHConnectionModal'
@@ -233,12 +233,30 @@ export function MainView() {
 
         {/* 中间：根据左侧 Tab 切换工作区 */}
         <div className="flex-1 min-w-0 overflow-hidden relative workbench-container">
-          {/* 本地文件夹标签页 - 文件树 + Monaco 编辑器 */}
+          {/* 本地文件夹标签页 - 文件树 + Monaco 编辑器 + 终端 */}
           {activeTab === 'local' && (
-            <div className="h-full min-w-0">
+            <div className="h-full min-w-0 flex flex-col">
               <Suspense fallback={<EditorSkeleton />}>
                 <LocalFileWorkspace />
               </Suspense>
+              {/* 底部终端面板 */}
+              {terminalVisible && (
+                <div style={{ height: terminalPanelSize, minHeight: 150, borderTop: `1px solid ${colors.border}` }} className="flex-shrink-0">
+                  <ErrorBoundary>
+                    <TerminalContainer 
+                      onTerminalSessionChange={handleTerminalSessionChange} 
+                    />
+                  </ErrorBoundary>
+                </div>
+              )}
+              {/* 终端拖拽条 */}
+              {terminalVisible && (
+                <div
+                  className="h-1 cursor-row-resize hover:bg-blue-500/30 flex-shrink-0"
+                  style={{ backgroundColor: isResizingTerminal ? colors.accent : 'transparent' }}
+                  onMouseDown={handleTerminalResizeStart}
+                />
+              )}
             </div>
           )}
 
@@ -246,9 +264,11 @@ export function MainView() {
           {activeTab === 'servers' && (
             <div className="h-full min-w-0">
               {terminalVisible ? (
-                <TerminalPanel 
-                  onTerminalSessionChange={handleTerminalSessionChange} 
-                />
+                <ErrorBoundary>
+                  <TerminalContainer 
+                    onTerminalSessionChange={handleTerminalSessionChange} 
+                  />
+                </ErrorBoundary>
               ) : (
                 <div className="h-full flex items-center justify-center">
                   <p className="text-sm" style={{ color: colors.textDim }}>终端已隐藏 (按 ⌘` 显示)</p>
@@ -450,10 +470,12 @@ export function MainView() {
                         {/* 终端标签 */}
                         {terminalVisible && isTerminalActive && (
                           <div className="absolute inset-0">
-                            <TerminalPanel 
-                              keepSessionOnUnmount={true}
-                              onTerminalSessionChange={handleTerminalSessionChange} 
-                            />
+                            <ErrorBoundary>
+                              <TerminalContainer 
+                                keepSessionOnUnmount={true}
+                                onTerminalSessionChange={handleTerminalSessionChange} 
+                              />
+                            </ErrorBoundary>
                           </div>
                         )}
                         {/* 文件标签 */}
@@ -481,10 +503,12 @@ export function MainView() {
                           onMouseDown={handleTerminalResizeStart}
                         />
                         <div style={{ height: terminalPanelSize, minHeight: 150 }}>
-                          <TerminalPanel 
-                            keepSessionOnUnmount={true}
-                            onTerminalSessionChange={handleTerminalSessionChange} 
-                          />
+                          <ErrorBoundary>
+                            <TerminalContainer 
+                              keepSessionOnUnmount={true}
+                              onTerminalSessionChange={handleTerminalSessionChange} 
+                            />
+                          </ErrorBoundary>
                         </div>
                       </div>
                     )}
@@ -503,10 +527,12 @@ export function MainView() {
                           onMouseDown={handleTerminalResizeStart}
                         />
                         <div style={{ width: terminalPanelSize, minWidth: 250 }}>
-                          <TerminalPanel 
-                            keepSessionOnUnmount={true}
-                            onTerminalSessionChange={handleTerminalSessionChange} 
-                          />
+                          <ErrorBoundary>
+                            <TerminalContainer 
+                              keepSessionOnUnmount={true}
+                              onTerminalSessionChange={handleTerminalSessionChange} 
+                            />
+                          </ErrorBoundary>
                         </div>
                       </div>
                     )}

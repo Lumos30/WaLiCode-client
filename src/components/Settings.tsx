@@ -98,10 +98,10 @@ export function Settings({ open, onClose }: SettingsProps) {
     return () => window.removeEventListener('keydown', handler)
   }, [open, handleCancel])
 
-  if (!open) return null
-
   const { colors } = useThemeStore()
   const themeList = (Object.entries(themes) as [ThemeName, typeof themes[ThemeName]][])
+
+  if (!open) return null
 
   const sections: { id: Section; label: string; icon: string }[] = [
     { id: 'general', label: '通用', icon: '⚙️' },
@@ -290,8 +290,8 @@ export function Settings({ open, onClose }: SettingsProps) {
 
             {section === 'about' && (
               <div className="flex flex-col items-center py-10">
-                <img src="/logo.png" alt="WaLiSSH" className="w-20 h-20 rounded-xl mb-4" />
-                <h3 className="text-lg font-semibold mb-1" style={{ color: colors.text }}>WaLiSSH</h3>
+                <img src="/logo.png" alt="WaLiCode" className="w-20 h-20 rounded-xl mb-4" />
+                <h3 className="text-lg font-semibold mb-1" style={{ color: colors.text }}>WaLiCode</h3>
                 <p className="text-[13px] mb-6" style={{ color: colors.textDim }}>v0.1.0 · AI + SSH 智能终端</p>
                 <div className="w-full max-w-sm p-4 rounded-lg text-[13px] space-y-3" style={{ backgroundColor: colors.bgInput }}>
                   {[

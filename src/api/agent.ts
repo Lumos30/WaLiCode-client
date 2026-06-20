@@ -174,6 +174,8 @@ export function reactChatStream(
   const toolStepMap = new Map<string, number>()
   // 工具调用 ID → 工具名映射（tool_result 时补回 toolName）
   const toolNameMap = new Map<string, string>()
+  // 工具名 → 最近 args 映射（tool_progress 完成时补回 args）
+  const toolProgressArgsMap = new Map<string, string>()
   let stepCounter = 0
   let lastFullText = ''
   let retryCount = 0
@@ -316,22 +318,28 @@ export function reactChatStream(
           case 'tool_progress': {
             // 工具执行实时进度 → 新建/更新步骤
             if (event.status === 'executing') {
+              // 保存 args 供完成事件使用
+              const tn = event.toolName || 'unknown'
+              if (event.args) toolProgressArgsMap.set(tn, event.args)
               // 工具开始执行
               stepCounter++
               onStep({
                 stepType: 'tool_call',
                 stepIndex: stepCounter,
-                toolName: event.toolName || 'unknown',
+                toolName: tn,
                 toolParams: event.args || '',
-                content: `正在执行 ${event.toolName || 'unknown'}: ${event.args || ''}`,
+                content: `正在执行 ${tn}: ${event.args || ''}`,
                 status: 'in_progress',
               })
             } else {
-              // 工具执行完成（success/error）
+              // 工具执行完成（success/error）→ 补回 args 作为 toolParams
+              const tn = event.toolName || 'unknown'
+              const savedArgs = toolProgressArgsMap.get(tn) || ''
               onStep({
                 stepType: 'tool_call',
                 stepIndex: stepCounter,
-                toolName: event.toolName || 'unknown',
+                toolName: tn,
+                toolParams: savedArgs,
                 toolResult: event.summary || '',
                 status: event.status === 'success' ? 'success' : 'failure',
               })
