@@ -265,11 +265,18 @@ export function FileWorkspace() {
                   </div>
                 )}
                 <Editor
+                  key={`${activeTab.key}:${activeTab.contentVersion ?? 0}`}
                   height="100%"
                   language={getLanguage(activeTab.name)}
                   theme={currentTheme === 'light' ? 'vs-light' : 'vs-dark'}
                   value={activeTab.content || ''}
-                  onChange={isEditing ? handleChange : undefined}
+                  path={activeTab.path}
+                  onChange={(value) => {
+                    // 始终注册 onChange 确保 value prop 能同步到 editor
+                    if (isEditing && value !== undefined) {
+                      handleChange(value)
+                    }
+                  }}
                   onMount={(editor) => {
                     // @ts-ignore
                     window.__activeMonacoEditor = editor

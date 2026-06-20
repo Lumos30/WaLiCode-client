@@ -621,10 +621,33 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       (subAgentInfo) => {
         console.log('[onSubAgent]', subAgentInfo.agentName, subAgentInfo.status, subAgentInfo.task || subAgentInfo.result || '')
       },
-      // onChangeSummary: 文件变更摘要
+      // onChangeSummary: 文件变更摘要 → 自动重载已打开的文件
       (changeSummary) => {
         console.log('[onChangeSummary]', changeSummary.description, changeSummary.created?.length, changeSummary.modified?.length, changeSummary.deleted?.length)
         updateMessageChangeSummary(sessionId, assistantId, changeSummary)
+
+        // 自动重载所有被修改/创建的已打开文件
+        const changedFiles = [...(changeSummary.modified || []), ...(changeSummary.created || [])]
+        if (changedFiles.length === 0) return
+
+        // 本地文件重载
+        const localStore = useLocalFileStore.getState()
+        for (const file of changedFiles) {
+          if (localStore.openTabs.some((t) => t.path === file.path)) {
+            localStore.reloadFileByPath(file.path).catch(() => {})
+          }
+        }
+
+        // 远程文件重载
+        const connectionId = activeBinding?.connectionId || currentConnectionId
+        if (connectionId) {
+          const fileStore = useFileExplorerStore.getState()
+          for (const file of changedFiles) {
+            if (fileStore.openTabs.some((t) => t.connectionId === connectionId && t.path === file.path)) {
+              fileStore.reloadFileByPath(connectionId, file.path).catch(() => {})
+            }
+          }
+        }
       },
     )
   }
