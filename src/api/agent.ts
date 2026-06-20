@@ -172,6 +172,8 @@ export function reactChatStream(
 
   // 工具调用 → 步骤索引映射
   const toolStepMap = new Map<string, number>()
+  // 工具调用 ID → 工具名映射（tool_result 时补回 toolName）
+  const toolNameMap = new Map<string, string>()
   let stepCounter = 0
   let lastFullText = ''
   let retryCount = 0
@@ -266,14 +268,16 @@ export function reactChatStream(
             // 工具调用 → 新建步骤
             stepCounter++
             const idx = stepCounter
+            const toolName = event.toolName || 'unknown'
             if (event.toolCallId) {
               toolStepMap.set(event.toolCallId, idx)
+              toolNameMap.set(event.toolCallId, toolName)
             }
             onStep({
               stepType: 'tool_call',
               stepIndex: idx,
-              toolName: event.toolName || 'unknown',
-              content: `调用 ${event.toolName || 'unknown'}`,
+              toolName,
+              content: `调用 ${toolName}`,
               status: 'in_progress',
             })
             break
@@ -283,11 +287,13 @@ export function reactChatStream(
             // 工具结果 → 更新已有步骤
             const toolCallId = event.toolCallId || ''
             const existingIdx = toolStepMap.get(toolCallId)
+            // 从映射补回 toolName（tool_result 事件本身不携带 toolName）
+            const resolvedToolName = toolNameMap.get(toolCallId) || ''
             if (existingIdx !== undefined) {
               onStep({
                 stepType: 'tool_call',
                 stepIndex: existingIdx,
-                toolName: '', // 已在 tool_call 中显示
+                toolName: resolvedToolName,
                 toolResult: event.content || '',
                 status: event.status === 'error' ? 'failure' : 'success',
                 error: event.status === 'error' ? event.content : undefined,
@@ -298,6 +304,7 @@ export function reactChatStream(
               onStep({
                 stepType: 'tool_call',
                 stepIndex: stepCounter,
+                toolName: resolvedToolName,
                 toolResult: event.content || '',
                 status: event.status === 'error' ? 'failure' : 'success',
                 error: event.status === 'error' ? event.content : undefined,

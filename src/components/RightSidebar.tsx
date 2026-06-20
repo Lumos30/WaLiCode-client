@@ -558,15 +558,30 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
             // 精确刷新变更文件所在目录
             const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
-            const { rootPath, refreshDirectory } = useLocalFileStore.getState()
+
+            // 本地文件树刷新
+            const localStore = useLocalFileStore.getState()
             if (changedDir) {
-              refreshDirectory(changedDir).catch(() => {})
-            } else if (rootPath) {
-              refreshDirectory(rootPath).catch(() => {})
+              localStore.refreshDirectory(changedDir).catch(() => {})
+            } else if (localStore.rootPath) {
+              localStore.refreshDirectory(localStore.rootPath).catch(() => {})
             }
-            // 只重载变更文件（而非当前活动文件）
-            if (changedPath) {
-              useLocalFileStore.getState().reloadFileByPath?.(changedPath).catch(() => {})
+            // 本地文件内容重载（删除操作除外）
+            if (changedPath && step.toolName !== 'deleteLocalFile') {
+              localStore.reloadFileByPath?.(changedPath).catch(() => {})
+            }
+
+            // 远程文件树刷新
+            const connectionId = activeBinding?.connectionId || currentConnectionId
+            if (connectionId) {
+              const fileStore = useFileExplorerStore.getState()
+              if (changedDir) {
+                fileStore.refreshDirectory(connectionId, changedDir).catch(() => {})
+              }
+              // 远程文件内容重载（删除操作除外）
+              if (changedPath && step.toolName !== 'deleteFile') {
+                fileStore.reloadFileByPath?.(connectionId, changedPath).catch(() => {})
+              }
             }
           }
         }
@@ -722,14 +737,14 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             <img src="/logo.png" alt="WaLiSSH" className="w-14 h-14 mb-2 opacity-60 rounded" />
             <h3 className="text-base font-medium" style={{ color: colors.text }}>开始对话</h3>
             <p className="text-xs text-center max-w-xs leading-relaxed" style={{ color: colors.textSecondary }}>
-              连接 SSH 后，可以向我询问服务器状态、执行命令、排查问题、管理文件。
+              打开工程或连接 SSH 后，可以辅助编码，以及向我询问服务器状态、执行命令、排查问题、管理文件。
             </p>
           </div>
         ) : currentSession.messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-4 px-6">
             <img src="/logo.png" alt="WaLiSSH" className="w-10 h-10 opacity-50 rounded" />
             <div className="text-center">
-              <p className="text-sm font-medium mb-1" style={{ color: colors.text }}>WaLiSSH AI</p>
+              <p className="text-sm font-medium mb-1" style={{ color: colors.text }}>WaLiCode AI</p>
               <p className="text-xs" style={{ color: colors.textDim }}>执行命令 · 排查问题 · 管理服务器</p>
             </div>
             <div className="w-full max-w-xs space-y-1.5">

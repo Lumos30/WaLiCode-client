@@ -115,7 +115,7 @@ body {
   background: rgba(79, 138, 245, 0.35);
 }
 
-/* ===== highlight.js 暗色主题（GitHub Dark 风格）===== */
+/* ===== highlight.js 暗色主题（GitHub Dark 风格）—— 默认 ===== */
 .hljs {
   color: #e6edf3;
   background: transparent;
@@ -124,7 +124,10 @@ body {
   color: #8b949e;
   font-style: italic;
 }
-.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type, .hljs-name {
+.hljs-keyword, .hljs-selector-tag {
+  color: #ff7b72;
+}
+.hljs-literal, .hljs-type, .hljs-name {
   color: #ff7b72;
 }
 .hljs-string, .hljs-attr, .hljs-meta-string, .hljs-regexp, .hljs-addition {
@@ -159,4 +162,73 @@ body {
 }
 .hljs-params {
   color: #e6edf3;
+}
+
+/* ===== highlight.js 浅色主题（VS Code Light 风格）=====
+   通过 :root[data-theme="light"] 切换，由 themeStore 控制 */
+:root[data-theme="light"] .hljs,
+:root[data-theme="light"] pre > code.hljs {
+  color: #383a42;
+  background: transparent;
+}
+:root[data-theme="light"] .hljs-comment,
+:root[data-theme="light"] .hljs-quote {
+  color: #a0a1a7;
+  font-style: italic;
+}
+:root[data-theme="light"] .hljs-keyword,
+:root[data-theme="light"] .hljs-selector-tag {
+  color: #e45649;
+}
+:root[data-theme="light"] .hljs-literal,
+:root[data-theme="light"] .hljs-type,
+:root[data-theme="light"] .hljs-name,
+:root[data-theme="light"] .hljs-built_in,
+:root[data-theme="light"] .hljs-title,
+:root[data-theme="light"] .hljs-class .hljs-title {
+  color: #50a14f;  /* 绿色：类型名、类名 */
+}
+:root[data-theme="light"] .hljs-string,
+:root[data-theme="light"] .hljs-attr,
+:root[data-theme="light"] .hljs-meta-string,
+:root[data-theme="light"] .hljs-regexp,
+:root[data-theme="light"] .hljs-addition {
+  color: #50a14f;  /* 绿色：字符串 */
+}
+:root[data-theme="light"] .hljs-number,
+:root[data-theme="light"] .hljs-symbol,
+:root[data-theme="light"] .hljs-bullet,
+:root[data-theme="light"] .hljs-link,
+:root[data-theme="light"] .hljs-meta,
+:root[data-theme="light"] .hljs-selector-id,
+:root[data-theme="light"] .hljs-selector-class {
+  color: #986801;  /* 金黄：数字/符号 */
+}
+:root[data-theme="light"] .hljs-function .hljs-title {
+  color: #4078f2;  /* 蓝色：函数名 */
+}
+:root[data-theme="light"] .hljs-variable,
+:root[data-theme="light"] .hljs-template-variable,
+:root[data-theme="light"] .hljs-attribute {
+  color: #e45649;  /* 红色：变量 */
+}
+:root[data-theme="light"] .hljs-deletion {
+  color: #e45649;
+}
+:root[data-theme="light"] .hljs-section {
+  color: #4078f2;
+}
+:root[data-theme="light"] .hljs-tag {
+  color: #a0a1a7;
+}
+:root[data-theme="light"] .hljs-params {
+  color: #383a42;
+}
+
+/* 浅色主题下代码块背景微灰，增强层次感 */
+:root[data-theme="light"] pre {
+  background-color: #f6f8fa !important;
+}
+:root[data-theme="light"] pre code.hljs {
+  background-color: transparent;
 }

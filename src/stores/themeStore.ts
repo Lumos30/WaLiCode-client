@@ -160,6 +160,21 @@ function resolveThemeColors(name: ThemeName): ThemeColors {
   return themes[name].colors
 }
 
+/** 获取主题的实际名称（system → dark/light），用于写入 DOM data-theme */
+function resolveThemeName(name: ThemeName): 'dark' | 'light' {
+  if (name === 'system') {
+    return resolveSystemTheme()
+  }
+  return name as 'dark' | 'light'
+}
+
+/** 将实际主题名写入 document.documentElement data-theme 属性，供 CSS 选择器使用 */
+function applyThemeToDOM(name: ThemeName) {
+  if (typeof document === 'undefined') return
+  const resolved = resolveThemeName(name)
+  document.documentElement.dataset.theme = resolved
+}
+
 interface ThemeStore {
   currentTheme: ThemeName
   colors: ThemeColors
@@ -167,6 +182,7 @@ interface ThemeStore {
 }
 
 const initialTheme = getInitialTheme()
+applyThemeToDOM(initialTheme)
 
 export const useThemeStore = create<ThemeStore>((set) => ({
   currentTheme: initialTheme,
@@ -178,6 +194,7 @@ export const useThemeStore = create<ThemeStore>((set) => ({
     } catch {
       // localStorage 不可用时忽略
     }
+    applyThemeToDOM(name)
     set({
       currentTheme: name,
       colors: resolveThemeColors(name),
@@ -191,7 +208,7 @@ if (typeof window !== 'undefined' && window.matchMedia) {
   mediaQuery.addEventListener('change', () => {
     const { currentTheme } = useThemeStore.getState()
     if (currentTheme === 'system') {
-      // 重新解析 colors
+      applyThemeToDOM('system')
       useThemeStore.setState({ colors: resolveThemeColors('system') })
     }
   })
