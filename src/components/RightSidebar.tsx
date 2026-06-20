@@ -513,40 +513,44 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         if (step.stepType === 'tool_call' && step.status === 'success' && step.toolName) {
           const fileWriteTools = ['writeLocalFile', 'createLocalFile', 'deleteLocalFile', 'writeFile', 'createFile', 'deleteFile']
           if (fileWriteTools.includes(step.toolName)) {
-            console.log('[onStep] 文件操作工具完成，刷新文件树和编辑器:', step.toolName)
+            console.log('[onStep] 文件操作工具完成，刷新文件树和编辑器:', step.toolName, 'toolResult=', step.toolResult?.substring(0, 200))
 
             const payload = parseToolResultPayload(step.toolResult)
-            const changedPath = payload?.path as string | undefined
-
-            if (step.toolName === 'writeLocalFile' && changedPath) {
-              const localStore = useLocalFileStore.getState()
-              const targetTab = localStore.openTabs.find((tab) => tab.path === changedPath)
-              const beforeContent = targetTab?.content ?? ''
-              localStore.reloadFileByPath(changedPath).then((afterContent) => {
-                if (afterContent != null && afterContent !== beforeContent) {
-                  useAiPatchStore.getState().upsertPreview({
-                    target: 'local',
-                    path: changedPath,
-                    toolName: step.toolName!,
-                    beforeContent,
-                    afterContent,
-                  })
-                }
-              }).catch(() => {})
+            let changedPath = payload?.path as string | undefined
+            // 兜底1: 从 toolParams/args 中提取路径（tool_progress 事件的 summary 不是 JSON）
+            if (!changedPath && step.toolParams) {
+              // toolParams 可能就是文件路径，或包含路径参数
+              const params = step.toolParams.trim()
+              if (params.startsWith('/')) {
+                changedPath = params
+              } else {
+                const pathMatch = params.match(/(\/\w[\w./-]+\.[\w]+)/)
+                if (pathMatch) changedPath = pathMatch[1]
+              }
             }
+            // 兜底2: 从 toolResult 文本中提取路径（非 JSON 格式时）
+            if (!changedPath && step.toolResult) {
+              const m = step.toolResult.match(/([\/][\w./-]+\.[\w]+)/)
+              if (m) changedPath = m[1]
+            }
+            console.log('[onStep] payload=', payload, 'changedPath=', changedPath, 'toolParams=', step.toolParams?.substring(0, 100))
 
-            if (step.toolName === 'writeFile' && changedPath) {
-              const connectionId = activeBinding?.connectionId || currentConnectionId
-              if (connectionId) {
-                const fileStore = useFileExplorerStore.getState()
-                const targetTab = fileStore.openTabs.find((tab) => tab.connectionId === connectionId && tab.path === changedPath)
+            const isLocalTool = step.toolName.includes('Local')
+            const isDeleteOp = step.toolName === 'deleteLocalFile' || step.toolName === 'deleteFile'
+
+            // 本地文件操作
+            if (isLocalTool) {
+              const localStore = useLocalFileStore.getState()
+
+              // 如果有明确路径，重载对应文件
+              if (changedPath && !isDeleteOp) {
+                const targetTab = localStore.openTabs.find((tab) => tab.path === changedPath)
                 const beforeContent = targetTab?.content ?? ''
-                fileStore.reloadFileByPath(connectionId, changedPath).then((afterContent) => {
+                localStore.reloadFileByPath(changedPath).then((afterContent) => {
                   if (afterContent != null && afterContent !== beforeContent) {
                     useAiPatchStore.getState().upsertPreview({
-                      target: 'remote',
-                      path: changedPath,
-                      connectionId,
+                      target: 'local',
+                      path: changedPath!,
                       toolName: step.toolName!,
                       beforeContent,
                       afterContent,
@@ -554,33 +558,61 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   }
                 }).catch(() => {})
               }
-            }
 
-            // 精确刷新变更文件所在目录
-            const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
-
-            // 本地文件树刷新
-            const localStore = useLocalFileStore.getState()
-            if (changedDir) {
-              localStore.refreshDirectory(changedDir).catch(() => {})
-            } else if (localStore.rootPath) {
-              localStore.refreshDirectory(localStore.rootPath).catch(() => {})
-            }
-            // 本地文件内容重载（删除操作除外）
-            if (changedPath && step.toolName !== 'deleteLocalFile') {
-              localStore.reloadFileByPath?.(changedPath).catch(() => {})
-            }
-
-            // 远程文件树刷新
-            const connectionId = activeBinding?.connectionId || currentConnectionId
-            if (connectionId) {
-              const fileStore = useFileExplorerStore.getState()
-              if (changedDir) {
-                fileStore.refreshDirectory(connectionId, changedDir).catch(() => {})
+              // 兜底3: 路径提取失败时，刷新当前活动 tab（本地）
+              if (!changedPath) {
+                const activeTab = localStore.openTabs.find((tab) => tab.key === localStore.activeTabKey)
+                if (activeTab && !isDeleteOp) {
+                  console.log('[onStep] 路径提取失败，兜底刷新当前活动 tab:', activeTab.path)
+                  localStore.reloadFileByPath(activeTab.path).catch(() => {})
+                }
               }
-              // 远程文件内容重载（删除操作除外）
-              if (changedPath && step.toolName !== 'deleteFile') {
-                fileStore.reloadFileByPath?.(connectionId, changedPath).catch(() => {})
+
+              // 文件树刷新
+              const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
+              if (changedDir) {
+                localStore.refreshDirectory(changedDir).catch(() => {})
+              } else if (localStore.rootPath) {
+                localStore.refreshDirectory(localStore.rootPath).catch(() => {})
+              }
+            }
+
+            // 远程文件操作
+            if (!isLocalTool) {
+              const connectionId = activeBinding?.connectionId || currentConnectionId
+              if (connectionId) {
+                const fileStore = useFileExplorerStore.getState()
+
+                if (changedPath && !isDeleteOp) {
+                  const targetTab = fileStore.openTabs.find((tab) => tab.connectionId === connectionId && tab.path === changedPath)
+                  const beforeContent = targetTab?.content ?? ''
+                  fileStore.reloadFileByPath(connectionId, changedPath).then((afterContent) => {
+                    if (afterContent != null && afterContent !== beforeContent) {
+                      useAiPatchStore.getState().upsertPreview({
+                        target: 'remote',
+                        path: changedPath!,
+                        connectionId,
+                        toolName: step.toolName!,
+                        beforeContent,
+                        afterContent,
+                      })
+                    }
+                  }).catch(() => {})
+                }
+
+                // 兜底3: 路径提取失败时，刷新当前活动 tab（远程）
+                if (!changedPath) {
+                  const activeTab = fileStore.openTabs.find((tab) => tab.connectionId === connectionId && tab.key === fileStore.activeTabKey)
+                  if (activeTab && !isDeleteOp) {
+                    console.log('[onStep] 路径提取失败，兜底刷新当前活动远程 tab:', activeTab.path)
+                    fileStore.reloadFileByPath(connectionId, activeTab.path).catch(() => {})
+                  }
+                }
+
+                const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
+                if (changedDir) {
+                  fileStore.refreshDirectory(connectionId, changedDir).catch(() => {})
+                }
               }
             }
           }
