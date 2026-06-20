@@ -1,17 +1,31 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import { Header } from '../components/Header'
 import { ActivityBar } from '../components/ActivityBar'
 import { LeftSidebar } from '../components/LeftSidebar'
 import { RightSidebar } from '../components/RightSidebar'
 import { TerminalPanel } from '../components/TerminalPanel'
-import { FileWorkspace } from '../components/FileWorkspace'
 import { SFTPWorkspace } from '../components/SFTPWorkspace'
-import { LocalFileWorkspace } from '../components/LocalFileWorkspace'
 import { Settings } from '../components/Settings'
 import { SSHConnectionModal } from '../components/SSHConnectionModal'
 import { useThemeStore } from '../stores/themeStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
+import { ErrorBoundary } from '../components/ErrorBoundary'
+
+// Lazy load Monaco 编辑器组件（减少首屏 bundle）
+const FileWorkspace = lazy(() => import('../components/FileWorkspace').then(m => ({ default: m.FileWorkspace })))
+const LocalFileWorkspace = lazy(() => import('../components/LocalFileWorkspace').then(m => ({ default: m.LocalFileWorkspace })))
+
+// 编辑器加载占位
+const EditorSkeleton = () => (
+  <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+    <div className="flex gap-1">
+      {[0, 150, 300].map(d => (
+        <span key={d} className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" style={{ animationDelay: `${d}ms` }} />
+      ))}
+    </div>
+  </div>
+)
 
 type TabId = 'servers' | 'files' | 'sftp' | 'local' | 'extensions'
 
@@ -222,7 +236,9 @@ export function MainView() {
           {/* 本地文件夹标签页 - 文件树 + Monaco 编辑器 */}
           {activeTab === 'local' && (
             <div className="h-full min-w-0">
-              <LocalFileWorkspace />
+              <Suspense fallback={<EditorSkeleton />}>
+                <LocalFileWorkspace />
+              </Suspense>
             </div>
           )}
 
@@ -443,7 +459,9 @@ export function MainView() {
                         {/* 文件标签 */}
                         {(!terminalVisible || !isTerminalActive || openTabs.length > 0) && (
                           <div className="absolute inset-0">
-                            <FileWorkspace />
+                            <Suspense fallback={<EditorSkeleton />}>
+                              <FileWorkspace />
+                            </Suspense>
                           </div>
                         )}
                       </>
@@ -453,7 +471,9 @@ export function MainView() {
                     {workbenchLayoutMode === 'split-horizontal' && terminalVisible && (
                       <div className="absolute inset-0 flex flex-col">
                         <div className="flex-1 min-h-0">
-                          <FileWorkspace />
+                          <Suspense fallback={<EditorSkeleton />}>
+                            <FileWorkspace />
+                          </Suspense>
                         </div>
                         <div 
                           className="h-1 cursor-row-resize hover:bg-blue-500/30" 
@@ -473,7 +493,9 @@ export function MainView() {
                     {workbenchLayoutMode === 'split-vertical' && terminalVisible && (
                       <div className="absolute inset-0 flex flex-row">
                         <div className="flex-1 min-w-0">
-                          <FileWorkspace />
+                          <Suspense fallback={<EditorSkeleton />}>
+                            <FileWorkspace />
+                          </Suspense>
                         </div>
                         <div 
                           className="w-1 cursor-col-resize hover:bg-blue-500/30" 
@@ -522,7 +544,9 @@ export function MainView() {
                 className={`absolute inset-y-0 -left-[3px] -right-[3px] ${isResizingChat ? '' : 'hover:bg-blue-500/30'} rounded-full`}
               />
             </div>
-            <RightSidebar width={chatWidth} activeTerminalSessionId={activeTerminalSessionId} />
+            <ErrorBoundary>
+              <RightSidebar width={chatWidth} activeTerminalSessionId={activeTerminalSessionId} />
+            </ErrorBoundary>
           </>
         )}
       </div>

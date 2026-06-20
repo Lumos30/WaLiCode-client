@@ -7,17 +7,10 @@ import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { useAiPatchStore } from '../stores/aiPatchStore'
 import * as agentApi from '../api/agent'
-import type { AgentMessage } from '../types'
 import type { ReActStep, TaskBreakdownDTO } from '../api/agent'
 import { ConnectionStatus } from '../types'
-import { TaskBreakdownCard } from './TaskBreakdownCard'
-
-// ===== ReAct 步骤渲染 =====
-const STEP_COLORS: Record<string, string> = {
-  thinking: '#f59e0b',
-  tool_call: '#8b5cf6',
-  result: '#22c55e',
-}
+import type { AgentMessage } from '../types'
+import { MessageBubble } from './MessageBubble'
 
 function parseToolResultPayload(raw?: string): Record<string, any> | null {
   if (!raw) return null
@@ -27,427 +20,6 @@ function parseToolResultPayload(raw?: string): Record<string, any> | null {
     const match = raw.match(/"path"\s*:\s*"([^"]+)"/)
     return match ? { path: match[1] } : null
   }
-}
-
-function ToolCallView({ step, colors }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
-  const [expanded, setExpanded] = useState(false)
-  const isSuccess = step.status === 'success'
-  const isFailure = step.status === 'failure'
-  const isInProgress = step.status === 'in_progress'
-  // 检测是否为子代理调用
-  const isSubAgent = step.toolName?.startsWith('🤖')
-  // Cursor 风格图标：沙漏(执行中) / 绿勾(成功) / 红叉(失败) / 🤖(子代理)
-  const statusIcon = isSubAgent
-    ? (<span className="text-sm flex-shrink-0">🤖</span>)
-    : isFailure
-    ? (<svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="#ef4444"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6" stroke="#fff" strokeWidth="2" strokeLinecap="round"/></svg>)
-    : isSuccess
-      ? (<svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="#22c55e"><circle cx="12" cy="12" r="10"/><polyline points="8 12 11 15 16 10" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>)
-      : (<svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="2s" repeatCount="indefinite"/></svg>)
-  const resultText = step.toolResult || ''
-  const hasResult = resultText.length > 0
-  return (
-    <div className={`rounded-lg overflow-hidden transition-opacity ${isInProgress ? 'opacity-80' : ''}`} style={{
-      border: `1px solid ${isFailure ? '#ef444440' : isInProgress ? `${colors.accent}30` : `${colors.border}`}`,
-      backgroundColor: colors.bgSecondary,
-    }}>
-      {/* 头部：工具名 + 状态 — Cursor 风格紧凑布局 */}
-      <button
-        onClick={() => hasResult && setExpanded(!expanded)}
-        className="w-full flex items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-black/5"
-        style={{ cursor: hasResult ? 'pointer' : 'default' }}
-      >
-        {statusIcon}
-        <span className="text-[12px] font-mono font-semibold flex-shrink-0" style={{ color: isSubAgent ? '#8b5cf6' : colors.accent }}>
-          {step.toolName || '工具'}
-        </span>
-        {step.toolParams && (
-          <span className="text-[11px] font-mono truncate flex-1 min-w-0" style={{ color: colors.textDim }}>
-            {step.toolParams.length > 60 ? step.toolParams.substring(0, 60) + '...' : step.toolParams}
-          </span>
-        )}
-        {!step.toolParams && <div className="flex-1" />}
-        {isInProgress && (
-          <span className="text-[10px] flex-shrink-0 px-1.5 py-0.5 rounded-full animate-pulse" style={{
-            backgroundColor: isSubAgent ? '#8b5cf615' : `${STEP_COLORS.tool_call}15`,
-            color: isSubAgent ? '#8b5cf6' : STEP_COLORS.tool_call,
-          }}>{isSubAgent ? '子代理运行中' : '执行中'}</span>
-        )}
-        {hasResult && !isInProgress && (
-          <span className="text-[10px] flex-shrink-0" style={{ color: colors.textDim }}>
-            {expanded ? '收起' : `${resultText.length} 字节`}
-          </span>
-        )}
-        {hasResult && (
-          <svg className={`w-3.5 h-3.5 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-        )}
-      </button>
-      {/* 展开内容：工具结果 */}
-      {hasResult && expanded && (
-        <div className="px-3 pb-2.5 border-t" style={{ borderColor: colors.border }}>
-          <pre className="text-[11px] mt-2 px-2.5 py-2 rounded-md overflow-x-auto leading-relaxed" style={{
-            backgroundColor: colors.bgPrimary,
-            color: colors.text,
-            fontFamily: '"SF Mono", "JetBrains Mono", "Fira Code", monospace',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-all',
-            maxHeight: '320px',
-            overflowY: 'auto',
-            lineHeight: '1.5',
-          }}>
-            {resultText}
-          </pre>
-        </div>
-      )}
-      {/* 错误信息 */}
-      {step.error && (
-        <div className="px-3 pb-2 text-[11px] flex items-start gap-1.5" style={{ color: '#ef4444' }}>
-          <svg className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
-          </svg>
-          {step.error}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ThinkingStepView({ step, colors }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
-  return (
-    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg" style={{
-      backgroundColor: `${STEP_COLORS.thinking}08`,
-      border: `1px solid ${STEP_COLORS.thinking}20`,
-    }}>
-      <svg className="w-3.5 h-3.5 flex-shrink-0 animate-pulse" style={{ color: STEP_COLORS.thinking }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"/>
-        <path d="M9 21h6"/>
-      </svg>
-      <span className="text-[11px]" style={{ color: colors.textSecondary }}>
-        {step.content || '思考中...'}
-      </span>
-    </div>
-  )
-}
-
-/**
- * ProcessTimeline — Cursor 风格工具调用折叠面板
- *
- * 核心特性：
- * 1. 进度条动画（执行中显示红色进度条，完成后变绿）
- * 2. 对话结束后自动折叠（所有步骤都完成时默认折叠）
- * 3. 折叠头显示统计（N 次工具）+ 状态圆点预览
- * 4. 展开后每个工具调用独立卡片，带状态图标
- */
-function ProcessTimeline({ steps, colors, isStreaming, isLoading }: { 
-  steps: ReActStep[]; 
-  colors: ReturnType<typeof useThemeStore.getState>['colors']; 
-  isStreaming?: boolean;
-  isLoading?: boolean;
-}) {
-  // 过滤掉 result 类型（最终结果单独展示为对话气泡）
-  const processSteps = steps.filter(s => s.stepType !== 'result')
-  if (processSteps.length === 0) return null
-
-  // 判断是否全部完成（无 in_progress 状态的步骤）
-  const allDone = processSteps.every(s => s.status !== 'in_progress')
-  // 默认行为：流式输出时展开，全部完成后自动折叠
-  const [collapsed, setCollapsed] = useState(() => !isStreaming)
-  
-  // 当流式结束或加载状态变为 false 时自动折叠
-  useEffect(() => {
-    const shouldAutoCollapse = allDone && !isStreaming && !isLoading && !collapsed
-    if (shouldAutoCollapse) {
-      // 延迟 1.5s 自动折叠，让用户看到完成状态
-      const timer = setTimeout(() => setCollapsed(true), 1500)
-      return () => clearTimeout(timer)
-    }
-  }, [allDone, isStreaming, isLoading, collapsed])
-  
-  // 流式开始时自动展开
-  useEffect(() => {
-    if ((isStreaming || isLoading) && collapsed) {
-      setCollapsed(false)
-    }
-  }, [isStreaming, isLoading])
-
-  const toolCount = processSteps.filter(s => s.stepType === 'tool_call').length
-  const thinkingCount = processSteps.filter(s => s.stepType === 'thinking').length
-  const successCount = processSteps.filter(s => s.status === 'success').length
-  const failCount = processSteps.filter(s => s.status === 'failure').length
-  const progressPercent = processSteps.length > 0 
-    ? Math.round((successCount + failCount) / processSteps.length * 100) 
-    : 100
-  // 进度条颜色：执行中红/橙，完成绿
-  const progressColor = allDone 
-    ? (failCount > 0 ? '#ef4444' : '#22c55e')
-    : '#ef4444'
-
-  return (
-    <div className="mb-2 rounded-lg overflow-hidden" style={{
-      border: `1px solid ${colors.border}40`,
-      backgroundColor: `${colors.bgSecondary}60`,
-    }}>
-      {/* ===== 折叠头（始终可见）===== */}
-      <button
-        onClick={() => setCollapsed(!collapsed)}
-        className="w-full flex items-center gap-2 px-3 py-2 transition-colors hover:bg-black/5"
-        style={{ color: colors.textDim }}
-      >
-        {/* 展开/收起箭头 */}
-        <svg className={`w-3.5 h-3.5 transition-transform duration-200 flex-shrink-0 ${collapsed ? 'rotate-0' : '-rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-        
-        {/* 文字标签 */}
-        <span className="text-[11px] font-medium select-none">
-          {collapsed ? '展开过程' : '收起过程'}
-        </span>
-        
-        {/* 统计数字 */}
-        <span className="text-[11px] font-medium tabular-nums" style={{ color: colors.textSecondary }}>
-          {toolCount > 0 && `${toolCount} 次工具`}
-          {thinkingCount > 0 && toolCount > 0 && ' · '}
-          {thinkingCount > 0 && `${thinkingCount} 轮思考`}
-        </span>
-        
-        <div className="flex-1" />
-        
-        {/* 状态圆点预览（最多显示 6 个） */}
-        <div className="flex gap-1 items-center">
-          {processSteps.slice(0, 6).map((s, i) => (
-            <div key={i} className="w-1.5 h-1.5 rounded-full transition-colors" style={{
-              backgroundColor: s.status === 'failure' ? '#ef4444'
-                : s.status === 'success' ? '#22c55e'
-                : STEP_COLORS[s.stepType] || colors.accent,
-            }} />
-          ))}
-          {processSteps.length > 6 && (
-            <span className="text-[9px] ml-0.5" style={{ color: colors.textDim }}>+{processSteps.length - 6}</span>
-          )}
-        </div>
-      </button>
-
-      {/* ===== 进度条（折叠头下方，类似截图中的红色横条）===== */}
-      <div className="h-0.5 w-full overflow-hidden" style={{ backgroundColor: `${colors.border}30` }}>
-        <div 
-          className="h-full transition-all duration-500 ease-out"
-          style={{ 
-            width: `${progressPercent}%`, 
-            backgroundColor: progressColor,
-            // 执行中时带脉冲动画
-            animation: allDone ? 'none' : 'progress-pulse 1.5s ease-in-out infinite',
-          }} 
-        />
-      </div>
-
-      {/* ===== 展开内容：工具调用列表 ===== */}
-      {!collapsed && (
-        <div className="px-2 pb-2 space-y-1.5 animate-in slide-in-from-top-1 duration-200">
-          {processSteps.map((step, i) => {
-            if (step.stepType === 'tool_call') {
-              return <ToolCallView key={i} step={step} colors={colors} />
-            }
-            if (step.stepType === 'thinking') {
-              return <ThinkingStepView key={i} step={step} colors={colors} />
-            }
-            return null
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function formatTime(timestamp: number): string {
-  const d = new Date(timestamp)
-  const mo = (d.getMonth() + 1).toString().padStart(2, '0')
-  const day = d.getDate().toString().padStart(2, '0')
-  const h = d.getHours()
-  const ap = h < 12 ? '上午' : '下午'
-  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h
-  const m = d.getMinutes().toString().padStart(2, '0')
-  return `${mo}-${day} ${ap}${h12}:${m}`
-}
-
-function CopyButton({ text, isUser, colors }: { text: string; isUser: boolean; colors: ReturnType<typeof useThemeStore.getState>['colors'] }) {
-  const [copied, setCopied] = useState(false)
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
-    }
-  }
-  return (
-    <button
-      onClick={handleCopy}
-      title="复制消息"
-      className="rounded cursor-pointer transition-all hover:opacity-80 flex items-center justify-center"
-      style={{
-        padding: '2px 4px',
-        backgroundColor: isUser ? 'rgba(0,0,0,0.15)' : colors.bgSecondary,
-        color: isUser ? 'rgba(255,255,255,0.95)' : colors.textSecondary,
-        border: isUser ? '1px solid rgba(0,0,0,0.1)' : `1px solid ${colors.border}`,
-      }}
-    >
-      {copied ? (
-        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <polyline points="20 6 9 17 4 12"></polyline>
-        </svg>
-      ) : (
-        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-        </svg>
-      )}
-    </button>
-  )
-}
-
-function MessageBubble({ message }: { message: AgentMessage }) {
-  const { colors } = useThemeStore()
-  const { isLoading } = useAgentStore()
-  const isUser = message.role === 'user'
-
-  const formatMarkdown = (text: string): string => {
-    let html = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-
-    // 1. 分割线 --- / *** / ___
-    html = html.replace(/^(?:---|\*{3}|_{3})\s*$/gm,
-      `<hr style="border:none;border-top:1px solid ${colors.border}40;margin:8px 0;" />`)
-
-    // 2. 标题 ## / ### / #### （必须在其他规则之前）
-    html = html.replace(/^#### (.+)$/gm, '<h4 style="font-size:12px;font-weight:600;color:${colors.text};margin:10px 0 4px;">$1</h4>')
-    html = html.replace(/^### (.+)$/gm, '<h3 style="font-size:13px;font-weight:600;color:${colors.text};margin:12px 0 5px;">$1</h3>')
-    html = html.replace(/^## (.+)$/gm, '<h2 style="font-size:14px;font-weight:600;color:${colors.text};margin:14px 0 6px;">$1</h2>')
-    html = html.replace(/^# (.+)$/gm, '<h1 style="font-size:16px;font-weight:700;color:${colors.text};margin:16px 0 6px;">$1</h1>')
-
-    // 3. 代码块（必须在行内代码之前，避免被误匹配）
-    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, _lang, code) => {
-      return `<pre style="margin:6px 0;padding:10px;border-radius:6px;overflow-x:auto;font-size:11px;font-family:'JetBrains Mono',monospace;background:${colors.bgSecondary};color:${colors.text};border:1px solid ${colors.border}"><code>${code.trim()}</code></pre>`
-    })
-
-    // 4. 引用块 >
-    html = html.replace(/^>\s?(.*)(?:\n>\s?(.*))*/gm, (match) => {
-      const content = match.replace(/^>\s?/gm, '')
-      return `<blockquote style="border-left: 3px solid ${colors.accent}; margin: 4px 0; padding-left: 8px; color: ${colors.textDim}; background: ${colors.bgSecondary}80; padding-top: 4px; padding-bottom: 4px; border-radius: 0 4px 4px 0;">${content}</blockquote>`
-    })
-
-    // 5. 无序列表 - item / * item
-    html = html.replace(/^[ 	]*[-*+] (.+)$/gm, '<li style="margin-left:16px;list-style-type:disc;color:${colors.text};line-height:1.6;">$1</li>')
-
-    // 6. 有序列表 1. item
-    html = html.replace(/^[ \t]*\d+\. (.+)$/gm, '<li style="margin-left:16px;list-style-type:decimal;color:${colors.text};line-height:1.6;">$1</li>')
-
-    // 7. 行内代码
-    html = html.replace(/`([^`]+)`/g, `<code style="padding:1px 5px;border-radius:3px;font-size:11px;font-family:monospace;background:${colors.bgHover};color:${colors.accent};border:1px solid ${colors.border}">$1</code>`)
-
-    // 8. 粗体
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-
-    // 9. 斜体
-    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-
-    // 10. 换行（最后执行）
-    html = html.replace(/\n/g, '<br/>')
-
-    return html
-  }
-
-  // 对于有 steps 的 assistant 消息，复制按钮应使用最终展示内容
-  const copyText = isUser ? message.content : (message.steps && message.steps.length > 0
-    ? (message.steps.find(s => s.stepType === 'result' && s.content)?.content || message.content || '')
-    : message.content || '')
-  const timeStr = formatTime(message.timestamp)
-  const timeBar = (
-    <div className={`flex items-center gap-1.5 mt-1 ${isUser ? 'justify-end' : 'justify-start'}`} style={{ fontSize: '10px', color: colors.textDim }}>
-      {isUser && copyText && <CopyButton text={copyText} isUser={isUser} colors={colors} />}
-      <span>{timeStr}</span>
-      {!isUser && copyText && <CopyButton text={copyText} isUser={false} colors={colors} />}
-    </div>
-  )
-
-  if (message.steps && message.steps.length > 0) {
-    // 分离 result 步骤和过程步骤
-    const resultStep = message.steps.find(s => s.stepType === 'result' && s.content)
-    const hasProcessSteps = message.steps.some(s => s.stepType !== 'result')
-    // 最终展示内容：优先取 result 步骤的 content，其次取 message.content（流式过程中）
-    const displayContent = resultStep?.content || message.content
-
-    return (
-      <div className="px-4 py-1.5 flex justify-start">
-        <div className="flex flex-col items-start max-w-[88%]">
-          {/* 任务拆解卡片 */}
-          {message.taskBreakdown && message.taskBreakdown.subTasks && message.taskBreakdown.subTasks.length > 0 && (
-            <TaskBreakdownCard breakdown={message.taskBreakdown} />
-          )}
-          {/* 过程时间线（Cursor 风格可折叠面板） */}
-          {hasProcessSteps && (
-            <ProcessTimeline 
-              steps={message.steps} 
-              colors={colors} 
-              isStreaming={!resultStep && message.content === ''}
-              isLoading={isLoading} 
-            />
-          )}
-          {/* AI 回复内容（独立对话气泡） */}
-          {displayContent && (
-            <div
-              className="px-3.5 py-2.5 text-[13px] leading-relaxed"
-              style={{
-                backgroundColor: colors.bgTertiary,
-                color: colors.text,
-                borderRadius: '12px 12px 12px 2px',
-              }}
-              dangerouslySetInnerHTML={{ __html: formatMarkdown(displayContent) }}
-            />
-          )}
-          {/* 流式加载指示器 */}
-          {!displayContent && !resultStep && (
-            <div className="px-3.5 py-2.5 flex items-center gap-2" style={{ backgroundColor: colors.bgTertiary, borderRadius: '12px 12px 12px 2px' }}>
-              <div className="flex gap-1">
-                {[0, 150, 300].map((delay) => (
-                  <span key={delay} className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: `pulse-dot 1.4s ${delay}ms infinite ease-in-out both` }} />
-                ))}
-              </div>
-            </div>
-          )}
-          {timeBar}
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className={`px-4 py-1.5 ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
-      <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
-        <div
-          className="max-w-[88%] px-3.5 py-2.5 text-[13px] leading-relaxed"
-          style={{
-            backgroundColor: isUser ? colors.accent : colors.bgTertiary,
-            color: isUser ? '#fff' : colors.text,
-            borderRadius: isUser ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
-          }}
-          dangerouslySetInnerHTML={{ __html: formatMarkdown(message.content) }}
-        />
-        {timeBar}
-      </div>
-    </div>
-  )
 }
 
 interface RightSidebarProps {
@@ -466,10 +38,12 @@ function escapeHtml(text: string) {
 
 function buildContextSpanHtml(tag: { id: string; label: string; type: string; fullContent: string }) {
   const icon = tag.type === 'file' ? '📄' : tag.type === 'terminal-selection' ? '🖥️' : '📎'
-  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 mx-1 rounded-md border text-[12px] align-middle select-none" data-context="${escapeHtml(encodeURIComponent(JSON.stringify(tag)))}" contenteditable="false" style="background:rgba(59,130,246,0.12);border-color:rgba(59,130,246,0.35);color:inherit;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;">
+  // 使用高对比度配色：深色边框 + 半透明白底 + 深色文字
+  // 无论在深色/浅色/蓝色气泡背景下都清晰可读
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 mx-1 rounded-md border text-[12px] align-middle select-none context-tag" data-context="${escapeHtml(encodeURIComponent(JSON.stringify(tag)))}" contenteditable="false" style="background:rgba(255,255,255,0.88);border-color:rgba(59,130,246,0.5);color:#1e3a5f;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 2px rgba(0,0,0,0.1);">
     <span>${icon}</span>
     <span style="max-width:160px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tag.label)}</span>
-    <span contenteditable="false" data-remove-context="true" class="ml-0.5 opacity-70 hover:opacity-100">✕</span>
+    <span contenteditable="false" data-remove-context="true" class="ml-0.5 opacity-60 hover:opacity-100 cursor-pointer">✕</span>
   </span>&nbsp;`
 }
 
@@ -485,6 +59,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     updateMessageSteps,
     updateMessageTaskBreakdown,
     updateSubTaskStatus,
+    updateMessageChangeSummary,
+    editAndRetry,
+    clearMessages,
     isLoading,
     setLoading,
     newConversation,
@@ -522,6 +99,89 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false)
   const [inputKey, setInputKey] = useState(0)
   const abortRef = useRef<(() => void) | null>(null)
+
+  // --- 输入历史导航 ---
+  const historyRef = useRef<string[]>([])
+  const historyIndexRef = useRef<number>(-1) // -1 = 当前输入
+  const savedInputRef = useRef<string>('') // 导航前的当前输入
+
+  // 从 localStorage 加载历史
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('chatInputHistory')
+      if (stored) historyRef.current = JSON.parse(stored)
+    } catch {}
+  }, [])
+
+  // 保存历史到 localStorage
+  const saveHistory = (history: string[]) => {
+    try {
+      // 最多保留 200 条
+      const trimmed = history.slice(-200)
+      localStorage.setItem('chatInputHistory', JSON.stringify(trimmed))
+      historyRef.current = trimmed
+    } catch {}
+  }
+
+  // 添加一条历史记录（发送时调用）
+  const pushHistory = (text: string) => {
+    if (!text.trim()) return
+    const history = [...historyRef.current]
+    // 避免连续重复
+    if (history[history.length - 1] !== text) {
+      history.push(text)
+      saveHistory(history)
+    }
+    historyIndexRef.current = -1
+  }
+
+  // 向上导航（更旧的历史）
+  const navigateHistoryUp = () => {
+    const history = historyRef.current
+    if (history.length === 0) return
+    if (historyIndexRef.current === -1) {
+      // 从当前输入开始导航
+      savedInputRef.current = inputRef.current?.innerText || ''
+      historyIndexRef.current = history.length - 1
+    } else if (historyIndexRef.current > 0) {
+      historyIndexRef.current--
+    }
+    const text = history[historyIndexRef.current]
+    if (inputRef.current) {
+      inputRef.current.innerText = text
+      // 光标移到最后
+      const range = document.createRange()
+      range.selectNodeContents(inputRef.current)
+      range.collapse(false)
+      const sel = window.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(range)
+    }
+  }
+
+  // 向下导航（更新的历史）
+  const navigateHistoryDown = () => {
+    const history = historyRef.current
+    if (historyIndexRef.current === -1) return // 已经在当前输入
+    if (historyIndexRef.current < history.length - 1) {
+      historyIndexRef.current++
+      const text = history[historyIndexRef.current]
+      if (inputRef.current) inputRef.current.innerText = text
+    } else {
+      // 回到当前输入
+      historyIndexRef.current = -1
+      if (inputRef.current) inputRef.current.innerText = savedInputRef.current
+    }
+    // 光标移到最后
+    if (inputRef.current) {
+      const range = document.createRange()
+      range.selectNodeContents(inputRef.current)
+      range.collapse(false)
+      const sel = window.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(range)
+    }
+  }
 
   const { openTabs, activeTabKey, activeConnectionId, currentPathByConnection } = useFileExplorerStore()
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/.test(navigator.platform)
@@ -769,6 +429,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     const plainText = inputRef.current.innerText.replace(/\u00a0/g, ' ').trim()
     if ((!plainText && inputTags.length === 0) || isLoading) return
 
+    // 保存到输入历史
+    if (plainText) pushHistory(plainText)
+
     if (!currentSessionId) {
       await createServerSession(currentAgentId)
     }
@@ -893,11 +556,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
               }
             }
 
+            // 精确刷新变更文件所在目录
+            const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
             const { rootPath, refreshDirectory } = useLocalFileStore.getState()
-            if (rootPath) {
+            if (changedDir) {
+              refreshDirectory(changedDir).catch(() => {})
+            } else if (rootPath) {
               refreshDirectory(rootPath).catch(() => {})
             }
-            useLocalFileStore.getState().reloadActiveFile().catch(() => {})
+            // 只重载变更文件（而非当前活动文件）
+            if (changedPath) {
+              useLocalFileStore.getState().reloadFileByPath?.(changedPath).catch(() => {})
+            }
           }
         }
       },
@@ -936,6 +606,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       (subAgentInfo) => {
         console.log('[onSubAgent]', subAgentInfo.agentName, subAgentInfo.status, subAgentInfo.task || subAgentInfo.result || '')
       },
+      // onChangeSummary: 文件变更摘要
+      (changeSummary) => {
+        console.log('[onChangeSummary]', changeSummary.description, changeSummary.created?.length, changeSummary.modified?.length, changeSummary.deleted?.length)
+        updateMessageChangeSummary(sessionId, assistantId, changeSummary)
+      },
     )
   }
 
@@ -950,6 +625,54 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.nativeEvent.isComposing) return
     const isModifier = e.metaKey || e.ctrlKey
+
+    // --- 快捷键体系 ---
+    // Ctrl/Cmd+L: 清空输入框
+    if (isModifier && e.key === 'l') {
+      e.preventDefault()
+      if (inputRef.current) {
+        inputRef.current.innerHTML = ''
+        inputRef.current.focus()
+      }
+      return
+    }
+    // Ctrl/Cmd+Shift+Backspace: 清空当前会话消息（保留会话）
+    if (isModifier && e.shiftKey && e.key === 'Backspace') {
+      e.preventDefault()
+      if (currentSessionId) {
+        clearMessages(currentSessionId)
+      }
+      return
+    }
+
+    // --- 输入历史导航 ---
+    // ↑: 上一条历史（光标在行首或输入框为空时）
+    if (e.key === 'ArrowUp' && !e.shiftKey && !isModifier) {
+      const text = inputRef.current?.innerText || ''
+      // 只在输入框为空或光标在第一行时触发
+      const selection = window.getSelection()
+      const isFirstLine = !selection || selection.anchorOffset === 0 || text.indexOf('\n') === -1
+      if (isFirstLine && (text.length === 0 || historyIndexRef.current !== -1)) {
+        e.preventDefault()
+        navigateHistoryUp()
+        return
+      }
+    }
+    // ↓: 下一条历史
+    if (e.key === 'ArrowDown' && !e.shiftKey && !isModifier) {
+      if (historyIndexRef.current !== -1) {
+        const selection = window.getSelection()
+        const text = inputRef.current?.innerText || ''
+        const isLastLine = !selection || selection.anchorOffset === text.length || text.indexOf('\n') === -1
+        if (isLastLine) {
+          e.preventDefault()
+          navigateHistoryDown()
+          return
+        }
+      }
+    }
+
+    // --- 发送快捷键 ---
     const shouldSend =
       (e.key === 'Enter' && !e.shiftKey && sendOnEnter && !isModifier) ||
       (e.key === 'Enter' && isModifier && !sendOnEnter)
@@ -1031,9 +754,15 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             </div>
           </div>
         ) : (
-          <div className="py-3">
+          <div className="py-3 overflow-hidden min-w-0">
             {currentSession.messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
+              <MessageBubble key={msg.id} message={msg} isLoading={isLoading} onEditRetry={(msgId) => {
+                if (currentSessionId) {
+                  editAndRetry(currentSessionId, msgId)
+                  // 聚焦输入框
+                  setTimeout(() => inputRef.current?.focus(), 50)
+                }
+              }} />
             ))}
             {isLoading && (
               <div className="px-4 py-2 flex justify-start">
@@ -1108,7 +837,46 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           {inputTags.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1 max-h-[100px] overflow-y-auto">
               {inputTags.map((tag) => (
-                <div key={tag.id} className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] max-w-[200px]" style={{ backgroundColor: colors.bgTertiary, border: `1px solid ${colors.border}`, color: colors.textSecondary }}>
+                <div
+                  key={tag.id}
+                  className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] max-w-[200px] transition-shadow"
+                  style={{
+                    backgroundColor: colors.bgTertiary,
+                    border: `1px solid ${colors.border}`,
+                    color: colors.textSecondary,
+                    cursor: tag.type === 'file' || tag.type === 'terminal-selection' ? 'pointer' : 'default',
+                  }}
+                  onDoubleClick={() => {
+                    if (tag.type === 'file') {
+                      // 从 fullContent 解析文件路径
+                      const localMatch = tag.fullContent.match(/^本地文件:\s*(.+)$/m)
+                      const remoteMatch = tag.fullContent.match(/^文件路径:\s*(.+)$/m)
+                      const filePath = (localMatch?.[1] || remoteMatch?.[1] || '').trim()
+                      if (!filePath) return
+                      // 先尝试本地文件
+                      const localStore = useLocalFileStore.getState()
+                      const localTab = localStore.openTabs.find(t => t.path === filePath)
+                      if (localTab) {
+                        localStore.setActiveTab(localTab.key)
+                        return
+                      }
+                      // 远程文件
+                      const remoteStore = useFileExplorerStore.getState()
+                      const remoteTab = remoteStore.openTabs.find(t => t.path === filePath)
+                      if (remoteTab) {
+                        remoteStore.setActiveTab(remoteTab.key)
+                      }
+                    } else if (tag.type === 'terminal-selection') {
+                      // 终端选中文本标签 - 提示已在终端上下文
+                      const tSessionId = activeBinding?.terminalSessionId
+                      if (tSessionId) {
+                        // 触发终端聚焦（如果有全局事件）
+                        window.dispatchEvent(new CustomEvent('focus-terminal', { detail: { sessionId: tSessionId } }))
+                      }
+                    }
+                  }}
+                  title={tag.type === 'file' ? '双击跳转到文件' : tag.type === 'terminal-selection' ? '双击跳转到终端' : undefined}
+                >
                   <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
                   </svg>

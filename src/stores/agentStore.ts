@@ -34,10 +34,15 @@ interface AgentStore {
   updateMessageTaskBreakdown: (sessionId: string, messageId: string, breakdown: import('../api/agent').TaskBreakdownDTO) => void
   // 更新子任务状态
   updateSubTaskStatus: (sessionId: string, messageId: string, subTaskIndex: number, status: string, result?: string) => void
+  // 更新文件变更摘要
+  updateMessageChangeSummary: (sessionId: string, messageId: string, summary: import('../api/agent').ChangeSummary) => void
+  // 编辑重发：删除从 messageId 开始的所有消息，将内容填入输入框
+  editAndRetry: (sessionId: string, messageId: string) => void
   // 设置输入框内容
   setInputText: (text: string) => void
   // 设置加载状态
   setLoading: (loading: boolean) => void
+  clearMessages: (sessionId: string) => void
   // 新建对话（点击新建时调用此方法）
   newConversation: (agentId: string) => Promise<void>
 }
@@ -156,9 +161,46 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return { sessions }
     }),
 
+  updateMessageChangeSummary: (sessionId, messageId, summary) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        const messages = session.messages.map((m) =>
+          m.id === messageId ? { ...m, changeSummary: summary } : m
+        )
+        sessions.set(sessionId, { ...session, messages })
+      }
+      return { sessions }
+    }),
+
   setInputText: (text) => set({ inputText: text }),
 
+  editAndRetry: (sessionId, messageId) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (!session) return {}
+      const msgIndex = session.messages.findIndex(m => m.id === messageId)
+      if (msgIndex < 0) return {}
+      const targetMsg = session.messages[msgIndex]
+      // 截断消息列表（保留 msgIndex 之前的消息）
+      const truncatedMessages = session.messages.slice(0, msgIndex)
+      sessions.set(sessionId, { ...session, messages: truncatedMessages })
+      return { sessions, inputText: targetMsg.content }
+    }),
+
   setLoading: (loading) => set({ isLoading: loading }),
+
+  clearMessages: (sessionId: string) => {
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (!session) return {}
+      sessions.set(sessionId, { ...session, messages: [] })
+      return { sessions }
+    })
+  },
 
   newConversation: async (agentId) => {
     await get().createServerSession(agentId)

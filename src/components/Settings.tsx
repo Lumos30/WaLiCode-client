@@ -100,7 +100,7 @@ export function Settings({ open, onClose }: SettingsProps) {
 
   if (!open) return null
 
-  const { colors } = themes[currentTheme]
+  const { colors } = useThemeStore()
   const themeList = (Object.entries(themes) as [ThemeName, typeof themes[ThemeName]][])
 
   const sections: { id: Section; label: string; icon: string }[] = [
@@ -221,27 +221,31 @@ export function Settings({ open, onClose }: SettingsProps) {
               <div className="space-y-6">
                 <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>外观设置</h2>
                 <div className="grid grid-cols-2 gap-4">
-                  {themeList.map(([name, config]) => (
+                  {themeList.map(([name, config]) => {
+                    // system 主题用当前实际 colors 展示预览
+                    const previewColors = name === 'system' ? colors : config.colors
+                    return (
                     <button
                       key={name}
                       onClick={() => setTheme(name)}
                       className="p-4 rounded-lg text-left transition-all border-2"
                       style={{
-                        backgroundColor: config.colors.bgPrimary,
-                        borderColor: currentTheme === name ? config.colors.accent : config.colors.border,
+                        backgroundColor: previewColors.bgPrimary,
+                        borderColor: currentTheme === name ? previewColors.accent : previewColors.border,
                       }}
                     >
                       <div className="flex gap-1.5 mb-3">
-                        {[config.colors.bgPrimary, config.colors.bgSecondary, config.colors.accent, config.colors.green].map((c, i) => (
-                          <div key={i} className="w-5 h-5 rounded-full border" style={{ backgroundColor: c, borderColor: config.colors.border }} />
+                        {[previewColors.bgPrimary, previewColors.bgSecondary, previewColors.accent, previewColors.green].map((c, i) => (
+                          <div key={i} className="w-5 h-5 rounded-full border" style={{ backgroundColor: c, borderColor: previewColors.border }} />
                         ))}
                       </div>
-                      <span className="text-[13px] font-medium" style={{ color: config.colors.text }}>{config.label}</span>
+                      <span className="text-[13px] font-medium" style={{ color: previewColors.text }}>{config.label}</span>
                       {currentTheme === name && (
-                        <span className="ml-2 text-xs" style={{ color: config.colors.accent }}>✓</span>
+                        <span className="ml-2 text-xs" style={{ color: previewColors.accent }}>✓</span>
                       )}
                     </button>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             )}

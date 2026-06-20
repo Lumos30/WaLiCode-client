@@ -25,6 +25,8 @@ export interface AgentMessage {
   steps?: ReActStep[]
   /** 任务拆解方案（task_breakdown 事件触发时设置） */
   taskBreakdown?: import('../api/agent').TaskBreakdownDTO
+  /** 文件变更摘要（done 事件中携带） */
+  changeSummary?: import('../api/agent').ChangeSummary
 }
 
 // Agent 会话

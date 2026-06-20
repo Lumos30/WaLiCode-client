@@ -55,6 +55,7 @@ export interface ReActEvent {
     completedSubTasks: number
   }
   subAgent?: SubAgentInfo
+  changeSummary?: ChangeSummary
 }
 
 /** 子代理调用信息 */
@@ -64,6 +65,23 @@ export interface SubAgentInfo {
   status: 'running' | 'success' | 'error'
   result?: string
   durationMs?: number
+}
+
+/** 文件变更摘要 */
+export interface ChangeSummary {
+  description?: string
+  topic?: string
+  created: ChangeFile[]
+  modified: ChangeFile[]
+  deleted: ChangeFile[]
+}
+
+/** 单个文件变更 */
+export interface ChangeFile {
+  path: string
+  kind: 'create' | 'modify' | 'delete'
+  addedLines?: number
+  removedLines?: number
 }
 
 /** 任务拆解 DTO */
@@ -145,6 +163,7 @@ export function reactChatStream(
   onTaskBreakdown?: (breakdown: TaskBreakdownDTO) => void,
   onTaskProgress?: (progress: { subTaskIndex: number; subTaskTitle: string; status: string; totalSubTasks: number; completedSubTasks: number }) => void,
   onSubAgent?: (info: SubAgentInfo) => void,
+  onChangeSummary?: (summary: ChangeSummary) => void,
 ): () => void {
   const baseUrl = getBaseUrl()
   const url = `${baseUrl}/api/v1/chat_stream`
@@ -155,15 +174,26 @@ export function reactChatStream(
   const toolStepMap = new Map<string, number>()
   let stepCounter = 0
   let lastFullText = ''
+  let retryCount = 0
+  const MAX_RETRIES = 2
+  const RETRY_DELAY = 1000
 
-  fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId }),
-    signal: controller.signal,
-  })
+  function doFetch() {
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId }),
+      signal: controller.signal,
+    })
     .then((res) => {
       if (!res.ok) {
+        // 5xx 错误时重试
+        if (res.status >= 500 && retryCount < MAX_RETRIES) {
+          retryCount++
+          console.warn(`[SSE] HTTP ${res.status}, retrying ${retryCount}/${MAX_RETRIES}...`)
+          setTimeout(doFetch, RETRY_DELAY * retryCount)
+          return
+        }
         onError(`HTTP ${res.status}: ${res.statusText}`)
         return
       }
@@ -344,6 +374,10 @@ export function reactChatStream(
               }
             }
             onStep(resultStep)
+            // 传递文件变更摘要
+            if (event.changeSummary) {
+              onChangeSummary?.(event.changeSummary)
+            }
             break
           }
 
@@ -413,9 +447,19 @@ export function reactChatStream(
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
+        // 网络错误重试
+        if (retryCount < MAX_RETRIES) {
+          retryCount++
+          console.warn(`[SSE] Network error, retrying ${retryCount}/${MAX_RETRIES}...`, err.message)
+          setTimeout(doFetch, RETRY_DELAY * retryCount)
+          return
+        }
         onError(err.message)
       }
     })
+  }
+
+  doFetch()
 
   return () => controller.abort()
 }

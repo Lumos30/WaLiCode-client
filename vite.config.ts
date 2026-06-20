@@ -21,6 +21,22 @@ export default defineConfig({
   clearScreen: false,
   build: {
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // React 核心
+          'react-vendor': ['react', 'react-dom'],
+          // Monaco 编辑器
+          'monaco-vendor': ['@monaco-editor/react', 'monaco-editor'],
+          // 终端
+          'xterm-vendor': ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-web-links', '@xterm/addon-webgl'],
+          // Markdown 渲染
+          'markdown-vendor': ['react-markdown', 'remark-gfm', 'rehype-highlight', 'highlight.js', 'lowlight'],
+          // Tauri API
+          'tauri-vendor': ['@tauri-apps/api', '@tauri-apps/plugin-dialog', '@tauri-apps/plugin-fs', '@tauri-apps/plugin-opener'],
+        },
+      },
+    },
   },
   server: {
     port: 5173,

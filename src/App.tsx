@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { useConnectionStore } from './stores/connectionStore'
 import { useLocalFileStore } from './stores/localFileStore'
 import { ConnectionStatus } from './types'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 function App() {
   const { startHeartbeat, stopHeartbeat, connections, disconnect } = useConnectionStore()
@@ -35,7 +36,11 @@ function App() {
   }, [connections, disconnect])
 
   // 使用 MainView 启用 SSH 智能体交互功能
-  return <MainView />
+  return (
+    <ErrorBoundary>
+      <MainView />
+    </ErrorBoundary>
+  )
 }
 
 export default App
