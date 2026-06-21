@@ -342,6 +342,245 @@ function ThinkingStepView({ step, colors, compact }: { step: ReActStep; colors: 
   )
 }
 
+// ===== ProcessTimeline 辅助函数 =====
+
+/** 从 toolParams/toolResult 中提取语义化标签 */
+function extractToolLabel(step: ReActStep): string {
+  const params = step.toolParams || ''
+  const result = step.toolResult || ''
+  const toolName = step.toolName || ''
+
+  // 尝试从 params 中提取文件路径
+  const filePathMatch = params.match(/(?:[\w.-]+\/)*[\w.-]+\.(java|js|ts|jsx|tsx|py|go|rs|rb|php|xml|html|vue|css|scss|json|yml|yaml|toml|sh|bash|zsh|sql|md|txt|properties|conf|cfg|env|gradle|xml|kt|swift|c|cpp|h|hpp)/i)
+  if (filePathMatch) {
+    const parts = filePathMatch[0].split('/')
+    return parts[parts.length - 1]
+  }
+
+  // SSH 命令：提取命令摘要
+  if (toolName.toLowerCase().includes('ssh') || toolName.toLowerCase().includes('exec') || toolName.toLowerCase().includes('shell')) {
+    const cmd = params.trim().split('\n')[0].trim()
+    if (cmd) return cmd.length > 50 ? cmd.substring(0, 50) + '...' : cmd
+  }
+
+  // readLocalFile / readFile → 取路径最后一段
+  if (toolName === 'readLocalFile' || toolName === 'readFile') {
+    const pathMatch = params.match(/['"]?([^'"\s]+)['"]?/)
+    if (pathMatch) {
+      const parts = pathMatch[1].split('/')
+      return parts[parts.length - 1] || pathMatch[1]
+    }
+  }
+
+  // CodeEditTool → 从 params 或 result 中提取 file/path
+  if (toolName === 'CodeEditTool' || toolName === 'CodeEdit') {
+    const fileFromParams = params.match(/(?:file|path|filePath)['"]?\s*[:=]\s*['"]?([^'"\s,]+)/i)
+    if (fileFromParams) {
+      const parts = fileFromParams[1].split('/')
+      return parts[parts.length - 1]
+    }
+    const fileFromResult = result.match(/(?:file|path|filePath)['"]?\s*[:=]\s*['"]?([^'"\s,]+)/i)
+    if (fileFromResult) {
+      const parts = fileFromResult[1].split('/')
+      return parts[parts.length - 1]
+    }
+  }
+
+  // 通用：尝试从 JSON params 中提取 file/path/command
+  if (params.trimStart().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(params)
+      const fileVal = parsed.file || parsed.path || parsed.filePath || parsed.filename
+      if (fileVal) {
+        const parts = String(fileVal).split('/')
+        return parts[parts.length - 1]
+      }
+      const cmdVal = parsed.command || parsed.cmd
+      if (cmdVal) return String(cmdVal).substring(0, 50)
+    } catch {}
+  }
+
+  // 通用：尝试从 JSON result 中提取 file/path
+  if (result.trimStart().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(result)
+      const fileVal = parsed.file || parsed.path || parsed.filePath
+      if (fileVal) {
+        const parts = String(fileVal).split('/')
+        return parts[parts.length - 1]
+      }
+    } catch {}
+  }
+
+  // 退回工具名本身
+  return toolName || '工具'
+}
+
+/** 工具分组接口 */
+interface ToolGroup {
+  toolName: string
+  label: string
+  steps: ReActStep[]
+  successCount: number
+  failCount: number
+}
+
+/** 将工具步骤按 (toolName, label) 分组聚合 */
+function groupToolSteps(steps: ReActStep[]): ToolGroup[] {
+  const groups: ToolGroup[] = []
+  const keyMap = new Map<string, number>()
+
+  for (const step of steps) {
+    const label = extractToolLabel(step)
+    const toolName = step.toolName || '未知'
+    const key = `${toolName}::${label}`
+
+    const idx = keyMap.get(key)
+    if (idx !== undefined) {
+      groups[idx].steps.push(step)
+      if (step.status === 'success') groups[idx].successCount++
+      if (step.status === 'failure') groups[idx].failCount++
+    } else {
+      keyMap.set(key, groups.length)
+      groups.push({
+        toolName,
+        label,
+        steps: [step],
+        successCount: step.status === 'success' ? 1 : 0,
+        failCount: step.status === 'failure' ? 1 : 0,
+      })
+    }
+  }
+
+  return groups
+}
+
+/** 获取工具对应的 emoji 图标 */
+function getToolIcon(toolName: string): string {
+  const name = toolName.toLowerCase()
+  if (name.includes('read') || name.includes('file')) return '📄'
+  if (name.includes('edit') || name.includes('write')) return '✏️'
+  if (name.includes('ssh') || name.includes('exec') || name.includes('shell')) return '💻'
+  if (name.includes('search') || name.includes('find') || name.includes('grep')) return '🔍'
+  if (name.includes('list') || name.includes('dir')) return '📁'
+  if (name.includes('agent') || name.includes('sub')) return '🤖'
+  return '🔧'
+}
+
+/** 生成折叠状态的语义摘要文本 */
+function buildCollapsedSummary(groups: ToolGroup[]): string {
+  return groups.map(g => {
+    const icon = getToolIcon(g.toolName)
+    const count = g.steps.length
+    if (count > 1) {
+      return `${icon} ${g.label} ×${count}`
+    }
+    return `${icon} ${g.label}`
+  }).join(' · ')
+}
+
+// ===== ToolGroupView 组件 =====
+const ToolGroupView = memo(function ToolGroupView({ group, colors, compact }: {
+  group: ToolGroup
+  colors: ReturnType<typeof useThemeStore.getState>['colors']
+  compact?: boolean
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const icon = getToolIcon(group.toolName)
+  const total = group.steps.length
+  const hasFail = group.failCount > 0
+  const allDone = group.steps.every(s => s.status !== 'in_progress')
+  const anyInProgress = group.steps.some(s => s.status === 'in_progress')
+
+  const statusText = anyInProgress
+    ? `${total - group.successCount - group.failCount} 执行中`
+    : hasFail
+      ? `${group.successCount}/${total} 完成`
+      : `${total} 完成`
+
+  const statusColor = hasFail ? '#ef4444' : allDone ? '#22c55e' : '#f59e0b'
+
+  // 紧凑模式：单行无背景
+  if (compact) {
+    return (
+      <div className="min-w-0">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center gap-1.5 px-2 py-1 rounded hover:bg-black/5 transition-colors min-w-0"
+        >
+          <span className="text-xs flex-shrink-0">{icon}</span>
+          <span className="text-[11px] font-mono font-medium truncate flex-shrink-0" style={{ color: colors.accent }}>
+            {group.label}
+          </span>
+          {total > 1 && (
+            <span className="text-[10px] flex-shrink-0" style={{ color: colors.textDim }}>×{total}</span>
+          )}
+          <span className="text-[9px] flex-shrink-0" style={{ color: statusColor }}>{statusText}</span>
+          <div className="flex-1" />
+          <svg className={`w-3 h-3 transition-transform flex-shrink-0 ${expanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </button>
+        {expanded && (
+          <div className="ml-3 mt-0.5 space-y-0.5">
+            {group.steps.map((step, i) => (
+              <ToolCallView key={i} step={step} colors={colors} compact />
+            ))}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-w-0">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors hover:bg-black/5 min-w-0"
+        style={{
+          backgroundColor: `${colors.bgPrimary}40`,
+          border: `1px solid ${colors.border}40`,
+        }}
+      >
+        <span className="text-sm flex-shrink-0">{icon}</span>
+        <span className="text-[11px] font-mono font-medium truncate flex-shrink-0" style={{ color: colors.accent }}>
+          {group.label}
+        </span>
+        {total > 1 && (
+          <span className="text-[10px] flex-shrink-0 px-1 rounded" style={{ backgroundColor: `${colors.accent}15`, color: colors.accent }}>
+            ×{total}
+          </span>
+        )}
+        <span className="text-[10px] flex-shrink-0" style={{ color: statusColor }}>{statusText}</span>
+        <div className="flex-1" />
+        {/* 状态点阵 */}
+        <div className="flex gap-0.5 items-center flex-shrink-0">
+          {group.steps.slice(0, 10).map((s, i) => (
+            <div key={i} className="w-1 h-1 rounded-full" style={{
+              backgroundColor: s.status === 'failure' ? '#ef4444'
+                : s.status === 'success' ? '#22c55e'
+                : '#f59e0b',
+            }} />
+          ))}
+          {group.steps.length > 10 && (
+            <span className="text-[8px]" style={{ color: colors.textDim }}>+{group.steps.length - 10}</span>
+          )}
+        </div>
+        <svg className={`w-3.5 h-3.5 transition-transform flex-shrink-0 ${expanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+      {expanded && (
+        <div className="ml-3 mt-0.5 space-y-1">
+          {group.steps.map((step, i) => (
+            <ToolCallView key={i} step={step} colors={colors} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
+
 // ===== ProcessTimeline（从 RightSidebar 迁移）=====
 function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   steps: ReActStep[]
@@ -353,10 +592,9 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   if (processSteps.length === 0) return null
 
   const allDone = processSteps.every(s => s.status !== 'in_progress')
-  // 对话完成时默认折叠（不管 isStreaming 首次值如何）
+  // 对话完成时默认折叠
   const [collapsed, setCollapsed] = useState(() => true)
-  const [showAll, setShowAll] = useState(false)
-  // 追踪流式状态跳变：isStreaming isLoading 从 true→false 时触发自动折叠
+  // 追踪流式状态跳变
   const prevStreamingRef = useRef(isStreaming || isLoading)
   // 追踪用户是否手动操作过折叠/展开
   const userToggledRef = useRef(false)
@@ -367,7 +605,7 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     // 流式/加载中 → 强制展开
     if ((isStreaming || isLoading) && collapsed) {
       setCollapsed(false)
-      autoCollapsedRef.current = false  // 重置，允许再次自动折叠
+      autoCollapsedRef.current = false
     }
   }, [isStreaming, isLoading])
 
@@ -376,7 +614,6 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     const wasStreaming = prevStreamingRef.current
     const nowStreaming = isStreaming || isLoading
     prevStreamingRef.current = nowStreaming
-    // 从流式中 → 流式结束 且全部完成 → 1.5s 后自动折叠
     if (wasStreaming && !nowStreaming && allDone && !userToggledRef.current && !autoCollapsedRef.current) {
       const timer = setTimeout(() => {
         setCollapsed(true)
@@ -397,18 +634,13 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     : 100
   const progressColor = allDone ? (failCount > 0 ? '#ef4444' : '#22c55e') : '#ef4444'
 
-  // 智能折叠：步骤 >5 个且非流式时，折叠中间步骤
-  const MAX_COLLAPSED = 5  // 折叠模式下最多显示数量
-  const shouldSmartCollapse = !showAll && !isStreaming && !isLoading && allDone && processSteps.length > MAX_COLLAPSED + 2
-  // 紧凑模式：步骤较多时使用单行展示（无背景无边框），点击可展开完整视图
-  const useCompactMode = !isStreaming && !isLoading && allDone && processSteps.length > 8
-  const visibleSteps = shouldSmartCollapse
-    ? [
-        ...processSteps.slice(0, 2),
-        ...processSteps.slice(-2),
-      ]
-    : processSteps
-  const hiddenCount = processSteps.length - visibleSteps.length
+  // 工具分组
+  const toolGroups = groupToolSteps(toolSteps)
+  // 紧凑模式：完成态 >6 步骤
+  const useCompactMode = !isStreaming && !isLoading && allDone && processSteps.length > 6
+
+  // 折叠状态摘要
+  const collapsedSummary = buildCollapsedSummary(toolGroups)
 
   return (
     <div className="mb-2 rounded-lg overflow-hidden min-w-0" style={{
@@ -423,23 +655,38 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
         <svg className={`w-3.5 h-3.5 transition-transform duration-200 flex-shrink-0 ${collapsed ? 'rotate-0' : '-rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <polyline points="6 9 12 15 18 9" />
         </svg>
-        <span className="text-[11px] font-medium select-none">
-          {collapsed ? '展开过程' : '收起过程'}
-        </span>
-        <span className="text-[11px] font-medium tabular-nums" style={{ color: colors.textSecondary }}>
-          {toolCount > 0 && `${toolCount} 次工具`}
-          {thinkingCount > 0 && toolCount > 0 && ' · '}
-          {thinkingCount > 0 && `${thinkingCount} 轮思考`}
-        </span>
+        {collapsed ? (
+          <>
+            <span className="text-[11px] font-medium select-none truncate flex-1 min-w-0" style={{ color: colors.textSecondary }}>
+              {collapsedSummary}
+            </span>
+            <span className="text-[10px] flex-shrink-0 tabular-nums" style={{ color: colors.textDim }}>
+              {toolCount > 0 && `${toolCount} 工具`}
+              {thinkingCount > 0 && ` · ${thinkingCount} 思考`}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-[11px] font-medium select-none flex-shrink-0">
+              收起过程
+            </span>
+            <span className="text-[11px] font-medium tabular-nums flex-shrink-0" style={{ color: colors.textSecondary }}>
+              {toolCount > 0 && `${toolCount} 次工具`}
+              {thinkingCount > 0 && toolCount > 0 && ' · '}
+              {thinkingCount > 0 && `${thinkingCount} 轮思考`}
+            </span>
+          </>
+        )}
         {failCount > 0 && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0" style={{
             backgroundColor: 'rgba(239,68,68,0.15)', color: '#ef4444',
           }}>
             {failCount} 失败
           </span>
         )}
-        <div className="flex-1" />
-        <div className="flex gap-1 items-center">
+        <div className="flex-shrink-0" />
+        {/* 状态点阵 */}
+        <div className="flex gap-1 items-center flex-shrink-0">
           {processSteps.slice(0, 6).map((s, i) => (
             <div key={i} className="w-1.5 h-1.5 rounded-full transition-colors" style={{
               backgroundColor: s.status === 'failure' ? '#ef4444'
@@ -464,64 +711,14 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
       </div>
       {!collapsed && (
         <div className="px-2 pb-2 space-y-1.5 animate-in slide-in-from-top-1 duration-200">
-          {visibleSteps.map((step, i) => {
-            // 在折叠点插入摘要行
-            const isBeforeGap = shouldSmartCollapse && i === 2
-            if (isBeforeGap) {
-              return (
-                <React.Fragment key={`gap-${i}`}>
-                  <button
-                    onClick={() => setShowAll(true)}
-                    className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md transition-colors hover:bg-black/5"
-                    style={{
-                      border: `1px dashed ${colors.border}60`,
-                      backgroundColor: `${colors.bgPrimary}40`,
-                    }}
-                  >
-                    <svg className="w-3 h-3" style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="6" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="18" r="1"/>
-                    </svg>
-                    <span className="text-[10px]" style={{ color: colors.textDim }}>
-                      展开中间 {hiddenCount} 个步骤
-                    </span>
-                  </button>
-                  {step.stepType === 'tool_call' ? <ToolCallView key={i} step={step} colors={colors} compact={useCompactMode} />
-                    : step.stepType === 'thinking' ? <ThinkingStepView key={i} step={step} colors={colors} compact={useCompactMode} /> : null}
-                </React.Fragment>
-              )
-            }
-            if (step.stepType === 'tool_call') return <ToolCallView key={i} step={step} colors={colors} compact={useCompactMode} />
-            if (step.stepType === 'thinking') return <ThinkingStepView key={i} step={step} colors={colors} compact={useCompactMode} />
-            return null
-          })}
-          {shouldSmartCollapse && (
-            <button
-              onClick={() => setShowAll(true)}
-              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md transition-colors hover:bg-black/5"
-              style={{
-                border: `1px dashed ${colors.border}60`,
-                backgroundColor: `${colors.bgPrimary}40`,
-              }}
-            >
-              <span className="text-[10px]" style={{ color: colors.textDim }}>
-                展开全部 {processSteps.length} 个步骤
-              </span>
-            </button>
-          )}
-          {showAll && !shouldSmartCollapse && processSteps.length > MAX_COLLAPSED + 2 && (
-            <button
-              onClick={() => setShowAll(false)}
-              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md transition-colors hover:bg-black/5"
-              style={{
-                border: `1px dashed ${colors.border}60`,
-                backgroundColor: `${colors.bgPrimary}40`,
-              }}
-            >
-              <span className="text-[10px]" style={{ color: colors.textDim }}>
-                折叠中间步骤
-              </span>
-            </button>
-          )}
+          {/* 思考步骤正常展示 */}
+          {thinkingSteps.map((step, i) => (
+            <ThinkingStepView key={`think-${i}`} step={step} colors={colors} compact={useCompactMode} />
+          ))}
+          {/* 工具按分组展示 */}
+          {toolGroups.map((group, i) => (
+            <ToolGroupView key={`group-${i}`} group={group} colors={colors} compact={useCompactMode} />
+          ))}
         </div>
       )}
     </div>

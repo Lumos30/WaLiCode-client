@@ -283,6 +283,7 @@ export function reactChatStream(
             stepCounter++
             const idx = stepCounter
             const toolName = event.toolName || 'unknown'
+            const toolArgs = event.args || ''
             if (event.toolCallId) {
               toolStepMap.set(event.toolCallId, idx)
               toolNameMap.set(event.toolCallId, toolName)
@@ -291,7 +292,8 @@ export function reactChatStream(
               stepType: 'tool_call',
               stepIndex: idx,
               toolName,
-              content: `调用 ${toolName}`,
+              toolParams: toolArgs,
+              content: toolArgs ? `调用 ${toolName}: ${toolArgs}` : `调用 ${toolName}`,
               status: 'in_progress',
             })
             break
