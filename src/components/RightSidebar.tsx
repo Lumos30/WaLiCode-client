@@ -6,6 +6,7 @@ import { useSshAgentStore } from '../stores/sshAgentStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { useAiPatchStore } from '../stores/aiPatchStore'
+import { useOutputStore } from '../stores/outputStore'
 import * as agentApi from '../api/agent'
 import type { ReActStep, TaskBreakdownDTO } from '../api/agent'
 import { ConnectionStatus } from '../types'
@@ -509,6 +510,79 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         console.log('[onStep]', step.stepType, step.content?.substring(0, 80))
         steps.push(step)
         updateMessageSteps(sessionId, assistantId, steps)
+
+        // 检测命令执行工具 → 写入输出面板
+        const commandExecTools = ['executeLocalCommand', 'compileProject', 'compileTests', 'runUnitTests', 'executeSshCommand']
+        if (step.stepType === 'tool_call' && step.toolName && commandExecTools.includes(step.toolName)) {
+          const outputStore = useOutputStore.getState()
+          const entrySessionId = `step-${step.stepIndex}`
+
+          if (step.status === 'in_progress') {
+            // 命令开始执行 → 创建 running 条目
+            const commandStr = step.toolParams || ''
+            outputStore.addEntry({
+              sessionId: entrySessionId,
+              command: commandStr,
+              status: 'running',
+              stdout: '',
+              stderr: '',
+              exitCode: null,
+              durationMs: null,
+            })
+          } else if (step.status === 'success' || step.status === 'failure') {
+            // 命令执行完成 → 更新条目
+            const existing = outputStore.entries.find((e) => e.sessionId === entrySessionId)
+            if (existing) {
+              // 解析工具返回结果
+              let stdout = ''
+              let stderr = ''
+              let exitCode = -1
+              let durationMs = 0
+
+              if (step.toolResult) {
+                try {
+                  const result = JSON.parse(step.toolResult)
+                  stdout = result.output || result.stdout || ''
+                  stderr = result.stderr || ''
+                  exitCode = result.exitCode ?? -1
+                  durationMs = result.timeoutMs || 0
+                } catch {
+                  stdout = step.toolResult
+                }
+              }
+
+              outputStore.updateEntry(entrySessionId, {
+                status: step.status === 'success' ? 'success' : 'failed',
+                stdout,
+                stderr,
+                exitCode,
+                durationMs,
+              })
+            } else {
+            // 没有找到 in_progress 时创建的条目（可能 step 被合并了），直接创建完成态条目
+              let stdout = ''
+              let exitCode = -1
+              if (step.toolResult) {
+                try {
+                  const result = JSON.parse(step.toolResult)
+                  stdout = result.output || result.stdout || ''
+                  exitCode = result.exitCode ?? -1
+                } catch {
+                  stdout = step.toolResult
+                }
+              }
+              outputStore.addEntry({
+                sessionId: entrySessionId,
+                command: step.toolParams || '',
+                status: step.status === 'success' ? 'success' : 'failed',
+                stdout,
+                stderr: '',
+                exitCode,
+                durationMs: 0,
+              })
+            }
+          }
+        }
 
         // 检测文件操作工具完成 → 刷新文件树 + 重载编辑器
         if (step.stepType === 'tool_call' && step.status === 'success' && step.toolName) {
