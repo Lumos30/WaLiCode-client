@@ -414,10 +414,14 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         const fileName = localTab?.name || remoteTab?.name || 'unknown'
         const prefix = localTab ? '本地文件' : '远程文件'
         
+        const startLine = selection.startLineNumber
+        const endLine = selection.endLineNumber
+        const lineRange = startLine === endLine ? `第 ${startLine} 行` : `第 ${startLine}-${endLine} 行`
+        
         insertTagAtCursor({
           id: `sel_${Date.now()}`,
-          label: `选中: ${fileName}`,
-          fullContent: `${prefix}: ${filePath}\n选中的代码/文本:\n\`\`\`\n${text}\n\`\`\``,
+          label: `选中: ${fileName} (${lineRange})`,
+          fullContent: `${prefix}: ${filePath} (${lineRange})\n选中的代码/文本:\n\`\`\`\n${text}\n\`\`\``,
           type: 'terminal-selection',
         })
       }
@@ -1094,8 +1098,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             }}
           />
 
-          {(!inputText || inputText.trim() === '') && (
-            <div className="absolute pointer-events-none text-sm" style={{ left: '16px', top: inputTags.length > 0 ? '42px' : '8px', color: colors.textDim, opacity: 0.6 }}>
+          {(!inputText || inputText.trim() === '') && inputTags.length === 0 && (
+            <div className="absolute pointer-events-none text-sm" style={{ left: '16px', top: '8px', color: colors.textDim, opacity: 0.6 }}>
               {inputPlaceholder()}
             </div>
           )}
