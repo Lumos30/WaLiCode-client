@@ -681,6 +681,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           }
         }
       },
+      // projectContext: 注入当前打开的本地工程信息
+      (() => {
+        const rootPath = useLocalFileStore.getState().rootPath
+        if (!rootPath) return null
+        const name = rootPath.split('/').filter(Boolean).pop() || ''
+        return name ? { name, rootPath } : null
+      })(),
     )
   }
 

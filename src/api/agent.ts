@@ -20,6 +20,14 @@ export interface CreateSessionResponseDTO {
   sessionId: string
 }
 
+/** 当前工程上下文 */
+export interface ProjectContextDTO {
+  /** 工程名称（文件夹名），如 "ai-mcp-gateway" */
+  name: string
+  /** 工程根路径（绝对路径），如 "/Users/xxx/coding/ai-mcp-gateway" */
+  rootPath: string
+}
+
 /** 对话请求 */
 export interface ChatRequestDTO {
   agentId: string
@@ -27,6 +35,9 @@ export interface ChatRequestDTO {
   sessionId: string
   message: string
   terminalSessionId?: string | null
+
+  /** 当前工程上下文（可选，由前端本地文件树注入） */
+  projectContext?: ProjectContextDTO | null
 }
 
 /** 后端 ReAct 事件（ReActEventDTO） */
@@ -164,6 +175,7 @@ export function reactChatStream(
   onTaskProgress?: (progress: { subTaskIndex: number; subTaskTitle: string; status: string; totalSubTasks: number; completedSubTasks: number }) => void,
   onSubAgent?: (info: SubAgentInfo) => void,
   onChangeSummary?: (summary: ChangeSummary) => void,
+  projectContext?: ProjectContextDTO | null,
 ): () => void {
   const baseUrl = getBaseUrl()
   const url = `${baseUrl}/api/v1/chat_stream`
@@ -186,7 +198,7 @@ export function reactChatStream(
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId }),
+      body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId, projectContext }),
       signal: controller.signal,
     })
     .then((res) => {
