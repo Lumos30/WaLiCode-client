@@ -277,6 +277,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   useEffect(() => {
     const autoBindCurrentConnection = async () => {
+      console.log('[RightSidebar] autoBindCurrentConnection check: activeTerminalSessionId=', activeTerminalSessionId, 'activeBinding=', activeBinding?.terminalSessionId, 'currentSessionId=', useAgentStore.getState().currentSessionId, 'currentAgentId=', currentAgentId)
       if (!activeTerminalSessionId) return
       if (activeBinding?.terminalSessionId === activeTerminalSessionId) return
       const connection = currentConnectionId
@@ -681,12 +682,21 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           }
         }
       },
-      // projectContext: 注入当前打开的本地工程信息
+      // projectContext: 注入当前打开的工程信息（本地文件夹 + 远程 SSH）
       (() => {
-        const rootPath = useLocalFileStore.getState().rootPath
-        if (!rootPath) return null
-        const name = rootPath.split('/').filter(Boolean).pop() || ''
-        return name ? { name, rootPath } : null
+        // 优先取本地文件树
+        const localRoot = useLocalFileStore.getState().rootPath
+        if (localRoot) {
+          const name = localRoot.split('/').filter(Boolean).pop() || ''
+          return name ? { name, rootPath: localRoot } : null
+        }
+        // 兜底：取远程 SSH 文件树的当前工作目录
+        const remoteCwd = currentPathByConnection[activeConnectionId || '']
+        if (remoteCwd) {
+          const name = remoteCwd.split('/').filter(Boolean).pop() || ''
+          return name ? { name, rootPath: remoteCwd } : null
+        }
+        return null
       })(),
     )
   }
@@ -882,6 +892,16 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           <div className="w-1 h-1 rounded-full bg-gray-400" />
         </div>
       </div>
+
+      {/* SSH 未连接提示 */}
+      {currentAgentId === '100000' && !activeTerminalSessionId && (
+        <div className="flex items-center gap-2 px-4 py-1.5 text-[11px] flex-shrink-0" style={{ backgroundColor: 'rgba(245,158,11,0.1)', color: '#f59e0b', borderBottom: `1px solid ${colors.border}` }}>
+          <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <span>未连接 SSH 终端，executeCommand 工具不可用。请先在终端中建立 SSH 连接。</span>
+        </div>
+      )}
 
       <div className="flex items-center justify-between px-4 py-2 border-t flex-shrink-0" style={{ backgroundColor: colors.bgSecondary, borderColor: colors.border }}>
         <div className="flex items-center gap-2">
