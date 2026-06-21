@@ -1,1 +1,12 @@
 /.idea/
+
+# OS
+.DS_Store
+
+# Build artifacts
+dist/
+node_modules/
+
+# Rust/Tauri
+src-tauri/Cargo.lock
+src-tauri/target/
