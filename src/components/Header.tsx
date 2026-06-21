@@ -5,15 +5,13 @@ import { useLocalFileStore } from '../stores/localFileStore'
 interface HeaderProps {
   onToggleSidebar: () => void
   sidebarVisible: boolean
-  onToggleTerminal: () => void
-  terminalVisible: boolean
   onToggleChat: () => void
   chatVisible: boolean
   onOpenSSHModal: () => void
   onOpenLocalFolder: () => void
 }
 
-export function Header({ onToggleSidebar, sidebarVisible, onToggleTerminal, terminalVisible, onToggleChat, chatVisible, onOpenSSHModal, onOpenLocalFolder }: HeaderProps) {
+export function Header({ onToggleSidebar, sidebarVisible, onToggleChat, chatVisible, onOpenSSHModal, onOpenLocalFolder }: HeaderProps) {
   const { colors } = useThemeStore()
   const { connections, currentConnectionId } = useConnectionStore()
   const currentConn = connections.find(c => c.id === currentConnectionId)
@@ -93,29 +91,8 @@ export function Header({ onToggleSidebar, sidebarVisible, onToggleTerminal, term
       {/* 中间：留白 */}
       <div className="flex-1" />
 
-      {/* 右侧：终端 + AI 对话 切换 */}
+      {/* 右侧：AI 对话 切换 */}
       <div className="flex items-center gap-2">
-        {/* 终端切换 */}
-        <button
-          onClick={onToggleTerminal}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-            terminalVisible
-              ? 'text-white'
-              : ''
-          }`}
-          style={{
-            backgroundColor: terminalVisible ? colors.accent : 'transparent',
-            color: terminalVisible ? '#fff' : colors.textSecondary,
-          }}
-          title="显示/隐藏终端 (⌘`)"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="4 17 10 11 4 5"></polyline>
-            <line x1="12" y1="19" x2="20" y2="19"></line>
-          </svg>
-          <span>终端</span>
-        </button>
-
         {/* AI 对话切换 */}
         <button
           onClick={onToggleChat}

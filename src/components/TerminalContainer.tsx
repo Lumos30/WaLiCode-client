@@ -18,11 +18,14 @@ interface TerminalContainerProps {
   onTerminalSessionChange?: (sessionId: string | null) => void
   /** 是否保持终端会话（卸载时不关闭） */
   keepSessionOnUnmount?: boolean
+  /** 收起终端回调 */
+  onCloseTerminal?: () => void
 }
 
 export function TerminalContainer({
   onTerminalSessionChange,
   keepSessionOnUnmount = true,
+  onCloseTerminal,
 }: TerminalContainerProps) {
   const { colors } = useThemeStore()
   const { currentConnectionId, connections } = useConnectionStore()
@@ -41,13 +44,30 @@ export function TerminalContainer({
 
   return (
     <div className="h-full flex flex-col min-w-0" style={{ backgroundColor: colors.bgPrimary }}>
-      <TerminalTabBar
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        localAvailable={true}
-        sshAvailable={sshAvailable}
-        hasOutput={outputEntries.length > 0}
-      />
+      <div className="flex items-center" style={{ borderBottom: `1px solid ${colors.border}` }}>
+        <div className="flex-1">
+          <TerminalTabBar
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            localAvailable={true}
+            sshAvailable={sshAvailable}
+            hasOutput={outputEntries.length > 0}
+          />
+        </div>
+        {/* 收起终端按钮 */}
+        {onCloseTerminal && (
+          <button
+            onClick={onCloseTerminal}
+            className="h-8 px-2 flex items-center justify-center hover:opacity-80 transition-opacity"
+            style={{ color: colors.textSecondary }}
+            title="向下收起终端"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+        )}
+      </div>
       <div className="flex-1 overflow-hidden">
         {activeTab === 'local' && (
           <LocalTerminal onSessionChange={onTerminalSessionChange} />

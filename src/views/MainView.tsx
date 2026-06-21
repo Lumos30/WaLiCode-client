@@ -11,6 +11,7 @@ import { useThemeStore } from '../stores/themeStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { ErrorBoundary } from '../components/ErrorBoundary'
+import { BottomPanelBar } from '../components/BottomPanelBar'
 
 // Lazy load Monaco 编辑器组件（减少首屏 bundle）
 const FileWorkspace = lazy(() => import('../components/FileWorkspace').then(m => ({ default: m.FileWorkspace })))
@@ -191,8 +192,6 @@ export function MainView() {
       <Header
         onToggleSidebar={() => setSidebarVisible(!sidebarVisible)}
         sidebarVisible={sidebarVisible}
-        onToggleTerminal={() => setTerminalVisible(!terminalVisible)}
-        terminalVisible={terminalVisible}
         onToggleChat={() => setChatVisible(!chatVisible)}
         chatVisible={chatVisible}
         onOpenSSHModal={() => setSshModalOpen(true)}
@@ -244,7 +243,8 @@ export function MainView() {
                 <div style={{ height: terminalPanelSize, minHeight: 150, borderTop: `1px solid ${colors.border}` }} className="flex-shrink-0">
                   <ErrorBoundary>
                     <TerminalContainer 
-                      onTerminalSessionChange={handleTerminalSessionChange} 
+                      onTerminalSessionChange={handleTerminalSessionChange}
+                      onCloseTerminal={() => setTerminalVisible(false)}
                     />
                   </ErrorBoundary>
                 </div>
@@ -257,23 +257,36 @@ export function MainView() {
                   onMouseDown={handleTerminalResizeStart}
                 />
               )}
+              {/* 底部边条 - 始终显示，用于收起/展开终端 */}
+              <BottomPanelBar
+                terminalVisible={terminalVisible}
+                onToggleTerminal={() => setTerminalVisible(!terminalVisible)}
+              />
             </div>
           )}
 
           {/* SSH 服务器标签页 - 只显示终端 */}
           {activeTab === 'servers' && (
-            <div className="h-full min-w-0">
-              {terminalVisible ? (
-                <ErrorBoundary>
-                  <TerminalContainer 
-                    onTerminalSessionChange={handleTerminalSessionChange} 
-                  />
-                </ErrorBoundary>
-              ) : (
-                <div className="h-full flex items-center justify-center">
-                  <p className="text-sm" style={{ color: colors.textDim }}>终端已隐藏 (按 ⌘` 显示)</p>
-                </div>
-              )}
+            <div className="h-full min-w-0 flex flex-col">
+              <div className="flex-1 min-h-0">
+                {terminalVisible ? (
+                  <ErrorBoundary>
+                    <TerminalContainer 
+                      onTerminalSessionChange={handleTerminalSessionChange}
+                      onCloseTerminal={() => setTerminalVisible(false)}
+                    />
+                  </ErrorBoundary>
+                ) : (
+                  <div className="h-full flex items-center justify-center">
+                    <p className="text-sm" style={{ color: colors.textDim }}>终端已隐藏 (按 ⌘` 显示)</p>
+                  </div>
+                )}
+              </div>
+              {/* 底部边条 - 始终显示，用于收起/展开终端 */}
+              <BottomPanelBar
+                terminalVisible={terminalVisible}
+                onToggleTerminal={() => setTerminalVisible(!terminalVisible)}
+              />
             </div>
           )}
 
@@ -473,7 +486,8 @@ export function MainView() {
                             <ErrorBoundary>
                               <TerminalContainer 
                                 keepSessionOnUnmount={true}
-                                onTerminalSessionChange={handleTerminalSessionChange} 
+                                onTerminalSessionChange={handleTerminalSessionChange}
+                                onCloseTerminal={() => setTerminalVisible(false)}
                               />
                             </ErrorBoundary>
                           </div>
@@ -506,7 +520,8 @@ export function MainView() {
                           <ErrorBoundary>
                             <TerminalContainer 
                               keepSessionOnUnmount={true}
-                              onTerminalSessionChange={handleTerminalSessionChange} 
+                              onTerminalSessionChange={handleTerminalSessionChange}
+                              onCloseTerminal={() => setTerminalVisible(false)}
                             />
                           </ErrorBoundary>
                         </div>
@@ -530,7 +545,8 @@ export function MainView() {
                           <ErrorBoundary>
                             <TerminalContainer 
                               keepSessionOnUnmount={true}
-                              onTerminalSessionChange={handleTerminalSessionChange} 
+                              onTerminalSessionChange={handleTerminalSessionChange}
+                              onCloseTerminal={() => setTerminalVisible(false)}
                             />
                           </ErrorBoundary>
                         </div>
@@ -539,6 +555,11 @@ export function MainView() {
                   </>
                 )}
               </div>
+              {/* 底部边条 - 始终显示，用于收起/展开终端 */}
+              <BottomPanelBar
+                terminalVisible={terminalVisible}
+                onToggleTerminal={() => setTerminalVisible(!terminalVisible)}
+              />
             </div>
           )}
 
