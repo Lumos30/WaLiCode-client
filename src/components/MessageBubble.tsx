@@ -193,7 +193,7 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
   // 先规范化 Markdown 格式，再处理 data:image
   const normalizedContent = useMemo(() => normalizeMarkdown(content), [content])
   const contentWithImages = useMemo(
-    () => normalizedContent.replace(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`),
+    () => normalizedContent.replace(/(?<!\]\()(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`),
     [normalizedContent]
   )
 

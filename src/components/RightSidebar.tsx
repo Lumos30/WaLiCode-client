@@ -542,7 +542,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     if (isLoading || !currentAgentId || !inputRef.current) return
     // 清除之前的错误恢复卡片
     setErrorRecovery(null)
-    const domHtml = inputRef.current.innerHTML
     const plainText = inputRef.current.innerText.replace(/\u00a0/g, ' ').trim()
     if ((!plainText && inputTags.length === 0) || isLoading) return
 
@@ -556,16 +555,26 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     if (!sessionId) return
 
     let messageContent = plainText
-    let displayContent = domHtml
+    // displayContent 始终用纯文本/Markdown 格式，不用 domHtml（原始 HTML 含 <span> 标签会导致渲染异常）
+    let displayContent = plainText
 
     const tagsContent = getInputTagsContent()
     if (tagsContent) {
-      const formattedTagsContent = tagsContent.split('\n').map(line => `> ${line}`).join('\n')
+      // messageContent 发给后端：图片标签不含 base64（后端不支持多模态，发 base64 浪费 token）
+      const serverTagsContent = inputTags.map(tag => {
+        const dataUrlMatch = tag.fullContent.match(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+)/)
+        if (dataUrlMatch) {
+          return `[用户上传了图片: ${tag.label}]`
+        }
+        return tag.fullContent
+      }).join('\n\n---\n\n')
+      const formattedServerTags = serverTagsContent.split('\n').map(line => `> ${line}`).join('\n')
       messageContent = plainText
-        ? `${plainText}\n\n**参考上下文：**\n${formattedTagsContent}`
-        : `**参考上下文：**\n${formattedTagsContent}`
+        ? `${plainText}\n\n**参考上下文：**\n${formattedServerTags}`
+        : `**参考上下文：**\n${formattedServerTags}`
+
+      // displayContent 仅前端渲染：图片用 Markdown 图片语法渲染预览
       const displayTags = inputTags.map(tag => {
-        // 图片标签：显示预览而非原始 base64 文本
         const dataUrlMatch = tag.fullContent.match(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+)/)
         if (dataUrlMatch) {
           return `> 📎 **${tag.label}**\n> ![](${dataUrlMatch[1]})`
@@ -576,7 +585,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         return `> 📎 **${tag.label}**\n> ${preview}`
       }).join('\n>\n')
       displayContent = plainText ? `${plainText}\n\n${displayTags}` : displayTags
-      // 发送后清空文件标签，避免残留
     }
 
     const selectedConn = activeBinding
