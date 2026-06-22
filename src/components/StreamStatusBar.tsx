@@ -17,6 +17,7 @@
 
 import { useEffect } from 'react'
 import { useStreamStore, StreamStatus } from '../stores/streamStore'
+import { chatConfig } from '../config/chat'
 
 const STATUS_CONFIG: Record<StreamStatus, { color: string; bg: string; icon: string; text: (n: number, err: string | null) => string } | null> = {
   idle: null,
@@ -59,7 +60,7 @@ export function StreamStatusBar() {
         console.warn('[StreamStatusBar] 心跳超时，标记为断开')
         setStatus('disconnected')
       }
-    }, 5000)
+    }, chatConfig.heartbeatTimeout / 6)
 
     return () => clearInterval(timer)
   }, [status, isHeartbeatStale, setStatus])

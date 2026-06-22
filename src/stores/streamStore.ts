@@ -6,6 +6,7 @@
  */
 
 import { create } from 'zustand'
+import { chatConfig } from '../config/chat'
 
 export type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'disconnected' | 'error'
 
@@ -40,10 +41,10 @@ export interface StreamState {
 export const useStreamStore = create<StreamState>((set, get) => ({
   status: 'idle',
   retryCount: 0,
-  maxRetries: 2,
+  maxRetries: chatConfig.maxRetries,
   lastError: null,
   lastActivityAt: null,
-  heartbeatTimeoutMs: 60_000,
+  heartbeatTimeoutMs: chatConfig.heartbeatTimeout,
   statusMessage: null,
 
   setStatus: (status) => set({ status }),

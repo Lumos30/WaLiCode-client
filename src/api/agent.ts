@@ -3,6 +3,7 @@
  */
 import { get, post, getBaseUrl } from './request'
 import { toolProgressStore } from '../components/ToolProgressBar'
+import { chatConfig } from '../config/chat'
 
 export interface AiAgentConfigDTO {
   agentId: string
@@ -224,6 +225,7 @@ export function reactChatStream(
   const url = `${baseUrl}/api/v1/chat_stream`
 
   const controller = new AbortController()
+  const cfg = chatConfig
 
   // 工具调用 → 步骤索引映射
   const toolStepMap = new Map<string, number>()
@@ -234,29 +236,45 @@ export function reactChatStream(
   let stepCounter = 0
   let lastFullText = ''
   let retryCount = 0
-  const MAX_RETRIES = 2
-  const RETRY_DELAY = 1000
   // 流中途断开重连参数
   let streamReconnectCount = 0
-  const MAX_STREAM_RECONNECTS = 3
-  const STREAM_RECONNECT_DELAY = 2000
   let isStreamStarted = false // 是否已开始接收流数据
   let isAborted = false // 用户主动取消
+  // 单次请求超时定时器
+  let requestTimer: ReturnType<typeof setTimeout> | null = null
+
+  function clearRequestTimer() {
+    if (requestTimer) {
+      clearTimeout(requestTimer)
+      requestTimer = null
+    }
+  }
 
   function doFetch() {
+    // 请求级超时：超过 cfg.requestTimeout 则中止本次请求并重试
+    clearRequestTimer()
+    const perRequestController = new AbortController()
+    const combinedSignal = AbortSignal.any([controller.signal, perRequestController.signal])
+    requestTimer = setTimeout(() => {
+      console.warn(`[SSE] request timeout after ${cfg.requestTimeout}ms`)
+      perRequestController.abort()
+    }, cfg.requestTimeout)
+
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId, projectContext }),
-      signal: controller.signal,
+      signal: combinedSignal,
     })
     .then((res) => {
+      clearRequestTimer()
       if (!res.ok) {
         // 5xx 错误时重试
-        if (res.status >= 500 && retryCount < MAX_RETRIES) {
+        if (res.status >= 500 && retryCount < cfg.maxRetries) {
           retryCount++
-          console.warn(`[SSE] HTTP ${res.status}, retrying ${retryCount}/${MAX_RETRIES}...`)
-          setTimeout(doFetch, RETRY_DELAY * retryCount)
+          console.warn(`[SSE] HTTP ${res.status}, retrying ${retryCount}/${cfg.maxRetries}...`)
+          onReconnect?.(retryCount, cfg.maxRetries)
+          setTimeout(doFetch, cfg.retryBaseDelay * retryCount)
           return
         }
         onError(`HTTP ${res.status}: ${res.statusText}`)
@@ -313,13 +331,13 @@ export function reactChatStream(
             return
           }
           // 流中途断开（网络错误/服务器关闭）
-          if (isStreamStarted && streamReconnectCount < MAX_STREAM_RECONNECTS) {
+          if (isStreamStarted && streamReconnectCount < cfg.maxStreamReconnects) {
             streamReconnectCount++
-            console.warn(`[SSE] stream interrupted, reconnecting ${streamReconnectCount}/${MAX_STREAM_RECONNECTS}...`, err.message)
-            onReconnect?.(streamReconnectCount, MAX_STREAM_RECONNECTS)
+            console.warn(`[SSE] stream interrupted, reconnecting ${streamReconnectCount}/${cfg.maxStreamReconnects}...`, err.message)
+            onReconnect?.(streamReconnectCount, cfg.maxStreamReconnects)
             setTimeout(() => {
               if (!isAborted) doFetch()
-            }, STREAM_RECONNECT_DELAY * streamReconnectCount)
+            }, cfg.streamReconnectBaseDelay * streamReconnectCount)
           } else if (lastFullText) {
             // 已达重连上限，但有累积内容 → 交付已有内容
             console.warn('[SSE] reconnect exhausted, delivering partial content')
@@ -587,12 +605,14 @@ export function reactChatStream(
       read()
     })
     .catch((err) => {
-      if (err.name !== 'AbortError') {
-        // 网络错误重试
-        if (retryCount < MAX_RETRIES) {
+      clearRequestTimer()
+      if (err.name !== 'AbortError' || !isAborted) {
+        // 网络错误 / 超时重试
+        if (retryCount < cfg.maxRetries) {
           retryCount++
-          console.warn(`[SSE] Network error, retrying ${retryCount}/${MAX_RETRIES}...`, err.message)
-          setTimeout(doFetch, RETRY_DELAY * retryCount)
+          console.warn(`[SSE] Network/timeout error, retrying ${retryCount}/${cfg.maxRetries}...`, err.message)
+          onReconnect?.(retryCount, cfg.maxRetries)
+          setTimeout(doFetch, cfg.retryBaseDelay * retryCount)
           return
         }
         onError(err.message)
@@ -604,6 +624,7 @@ export function reactChatStream(
 
   return () => {
     isAborted = true
+    clearRequestTimer()
     controller.abort()
   }
 }
