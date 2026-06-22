@@ -197,6 +197,13 @@ export async function createSession(agentId: string, userId: string = 'default')
  * - done:         全部完成（content=最终结果 JSON）
  * - error:        错误
  */
+export interface InlineImageData {
+  /** base64 编码数据（不含 data:image/xxx;base64, 前缀） */
+  data: string
+  /** MIME 类型，如 image/png、image/jpeg */
+  mimeType: string
+}
+
 export function reactChatStream(
   agentId: string,
   userId: string,
@@ -220,6 +227,8 @@ export function reactChatStream(
   onRoundStart?: (roundIndex: number) => void,
   onReconnect?: (attempt: number, maxAttempts: number) => void,
   onHeartbeat?: () => void,
+  // ── 多模态支持 ──
+  inlineDatas?: InlineImageData[],
 ): () => void {
   const baseUrl = getBaseUrl()
   const url = `${baseUrl}/api/v1/chat_stream`
@@ -263,7 +272,7 @@ export function reactChatStream(
     fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId, projectContext }),
+      body: JSON.stringify({ agentId, userId, sessionId, message, terminalSessionId, projectContext, inlineDatas }),
       signal: combinedSignal,
     })
     .then((res) => {

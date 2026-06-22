@@ -558,9 +558,21 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     // displayContent 始终用纯文本/Markdown 格式，不用 domHtml（原始 HTML 含 <span> 标签会导致渲染异常）
     let displayContent = plainText
 
+    // 提取图片的 inlineDatas（传给后端 AI 模型的多模态数据）
+    const inlineDatas: { data: string; mimeType: string }[] = []
+    inputTags.forEach(tag => {
+      const dataUrlMatch = tag.fullContent.match(/data:image\/([a-zA-Z]+);base64,([A-Za-z0-9+/=]+)/)
+      if (dataUrlMatch) {
+        inlineDatas.push({
+          mimeType: `image/${dataUrlMatch[1]}`,
+          data: dataUrlMatch[2],
+        })
+      }
+    })
+
     const tagsContent = getInputTagsContent()
     if (tagsContent) {
-      // messageContent 发给后端：图片标签不含 base64（后端不支持多模态，发 base64 浪费 token）
+      // messageContent 发给后端：图片标签保留描述文字（AI 可通过 inlineDatas 看到图片）
       const serverTagsContent = inputTags.map(tag => {
         const dataUrlMatch = tag.fullContent.match(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+)/)
         if (dataUrlMatch) {
@@ -977,6 +989,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       () => {
         useStreamStore.getState().touchActivity()
       },
+      // inlineDatas: 多模态图片数据
+      inlineDatas.length > 0 ? inlineDatas : undefined,
     )
   }
 
