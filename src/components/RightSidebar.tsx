@@ -48,6 +48,39 @@ function escapeHtml(text: string) {
     .replace(/'/g, '&#39;')
 }
 
+/**
+ * 清理粘贴文本中的 Markdown 格式符号，转为纯文本
+ * 解决从 AI 回复中复制内容粘贴到输入框时，显示 **、##、1. 等原始标记的问题
+ */
+function stripMarkdownForPaste(text: string): string {
+  if (!text) return text
+  return text
+    // 标题: ## 标题 → 标题
+    .replace(/^#{1,6}\s+/gm, '')
+    // 加粗: **text** 或 __text__ → text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    // 斜体: *text* 或 _text_ → text（避免误匹配列表标记）
+    .replace(/(?<!\w)\*([^*]+?)\*(?!\w)/g, '$1')
+    .replace(/(?<!\w)_([^_]+?)_(?!\w)/g, '$1')
+    // 行内代码: `text` → text
+    .replace(/`([^`]+?)`/g, '$1')
+    // 链接: [text](url) → text
+    .replace(/\[([^\]]+?)\]\([^)]+?\)/g, '$1')
+    // 图片: ![alt](url) → alt
+    .replace(/!\[([^\]]*?)\]\([^)]+?\)/g, '$1')
+    // 无序列表: - item / * item / + item → item
+    .replace(/^\s*[-*+]\s+/gm, '')
+    // 有序列表: 1. item → item
+    .replace(/^\s*\d+\.\s+/gm, '')
+    // 引用: > text → text
+    .replace(/^>\s*/gm, '')
+    // 分割线: --- 或 *** → 空行
+    .replace(/^[-*_]{3,}\s*$/gm, '')
+    // 代码块标记: ``` → 移除
+    .replace(/^```\w*$/gm, '')
+}
+
 function buildContextSpanHtml(tag: { id: string; label: string; type: string; fullContent: string }) {
   const icon = tag.type === 'file' ? '📄' : tag.type === 'terminal-selection' ? '🖥️' : '📎'
   // 使用高对比度配色：深色边框 + 半透明白底 + 深色文字
@@ -1314,8 +1347,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             }}
             onPaste={(e) => {
               e.preventDefault()
-              const text = e.clipboardData.getData('text/plain')
-              document.execCommand('insertText', false, text)
+              const rawText = e.clipboardData.getData('text/plain')
+              const cleanText = stripMarkdownForPaste(rawText)
+              document.execCommand('insertText', false, cleanText)
               syncInputTextFromDom()
             }}
             className="w-full bg-transparent resize-none outline-none text-[13px] leading-relaxed flex-1 whitespace-pre-wrap break-words min-h-[120px] max-h-[280px] overflow-y-auto"

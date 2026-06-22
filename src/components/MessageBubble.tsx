@@ -101,22 +101,81 @@ function ThinkingBlock({ content, isStreaming }: { content: string; isStreaming:
   )
 }
 
-// ===== Markdown 预处理：修复 AI 返回的不规范格式 =====
-// CommonMark 规范要求标题、列表前必须有空行，否则会被解析为普通文本
-// AI 经常在同一行中直接跟 ## 标题，或在不空行的地方开始列表
+// ===== Markdown 格式规范化 =====
+// AI 模型（尤其 Gemini/Google ADK）返回的 Markdown 经常缺少换行符，
+// 导致标题、列表、表格、水平线等元素粘在一行，ReactMarkdown 无法正确解析。
+// 在前端渲染前做统一处理，确保内容符合 CommonMark 规范。
 function normalizeMarkdown(text: string): string {
   if (!text) return text
-  // 在行内出现的标题标记(## 标题)前插入换行+空行
-  // 匹配：非换行符 + ## (标题) → 在 ## 前插入 \n\n
-  let result = text.replace(/([^\n\s])(#{1,6}\s)/g, '$1\n\n$2')
-  // 在行首的标题标记前确保有空行（如果前一行非空）
+  let result = text
+
+  // ══════ Phase 0: 保护代码块 ══════
+  const codeBlocks: string[] = []
+  result = result.replace(/```[\s\S]*?```/g, (m) => {
+    codeBlocks.push(m)
+    return `\x00CB${codeBlocks.length - 1}\x00`
+  })
+
+  // ══════ Phase 1: 表格 || → |\n| ══════
+  result = result.replace(/\|\|/g, '|\n|')
+
+  // ══════ Phase 2: 断行 ══════
+
+  // 2a. 标题后无空格 → 补空格 (##标题 → ## 标题)
+  result = result.replace(/(#{1,6})([^\s#\n])/g, '$1 $2')
+  // 2b. 标题前断行
+  result = result.replace(/([^\n#])(#{1,6}\s)/g, '$1\n\n$2')
+  // 2c. 标题后紧跟 ** → 断行（不含列表标记中的数字）
+  result = result.replace(/(#{1,6}\s[^\n#*\d]+?)(\*\*)/g, '$1\n\n$2')
+  // 2d. 标题后紧跟 | → 断行
+  result = result.replace(/(#{1,6}\s[^|\n]+)(\|)/g, '$1\n\n$2')
+
+  // 2e. 标题+正文粘连：用句首模式检测
+  const sentenceStarts = ['这是一个', '这是', '它是', '该系统', '该项目', '我们', '以下', '其中', '它通过', '它基于']
+  result = result.replace(/^(#{1,6}\s)([^\n]+)$/gm, (match, prefix, content) => {
+    for (const start of sentenceStarts) {
+      const idx = content.indexOf(start)
+      if (idx >= 2 && idx <= 12) {
+        return prefix + content.substring(0, idx) + '\n\n' + content.substring(idx)
+      }
+    }
+    return match
+  })
+
+  // 2f. 有序列表前断行
+  result = result.replace(/([^\n])(\d+\.\s)/g, '$1\n$2')
+  // 2g. 代码块前断行
+  result = result.replace(/([^\n])(```)/g, '$1\n$2')
+  // 2h. 分割线前后断行
+  result = result.replace(/([^\n-])(---)/g, '$1\n$2')
+  result = result.replace(/(---)([^\n|-])/g, '$1\n$2')
+
+  // ══════ Phase 3: 间距修复 ══════
   result = result.replace(/([^\n])\n(#{1,6}\s)/g, '$1\n\n$2')
-  // 在行首的无序列表标记(- , * , + )前插入空行
-  result = result.replace(/([^\n])\n([-*+]\s)/g, '$1\n\n$2')
-  // 在行首的有序列表标记(1. , 2. )前插入空行
-  result = result.replace(/([^\n])\n(\d+\.\s)/g, '$1\n\n$2')
-  // 在代码块标记(​​`​​`)前插入空行
+  result = result.replace(/(^|\n)(#{1,6}\s[^\n]+)(\n)(?!\n|#{1,6}\s)/gm, '$1$2$3\n')
   result = result.replace(/([^\n])\n(```)/g, '$1\n\n$2')
+  result = result.replace(/([^\n|])\n(\|)/g, '$1\n\n$2')
+  result = result.replace(/(\|[^\n]+)\n(?!\n|\|)([^\n|])/g, '$1\n\n$2')
+  result = result.replace(/([^\n])\n(---)/g, '$1\n\n$2')
+  result = result.replace(/(---)\n([^\n])/g, '$1\n\n$2')
+  // 列表项之间保持紧凑
+  result = result.replace(/(\d+\.\s[^\n]+)\n\n(\d+\.\s)/g, '$1\n$2')
+
+  // ══════ Phase 4: 表格分隔行格式化 ══════
+  result = result.replace(/^\|([-:\s|]+)\|$/gm, (match, inner: string) => {
+    if (!inner.includes('-')) return match
+    const cells = inner.split('|').map(c => ' ' + c.trim() + ' ')
+    return '|' + cells.join('|') + '|'
+  })
+
+  // ══════ Phase 5: 清理 ══════
+  result = result.replace(/\n{3,}/g, '\n\n')
+
+  // ══════ Phase 6: 恢复代码块 ══════
+  result = result.replace(/\x00CB(\d+)\x00/g, (_m, idx: string) => {
+    return codeBlocks[parseInt(idx)]
+  })
+
   return result
 }
 
@@ -131,16 +190,12 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
     return null
   }
 
-  // 预处理：将 data:image URL 转换为 markdown 图片语法，使其能被 ReactMarkdown 渲染为 <img>
-  // 同时保持其他文本内容不变
+  // 先规范化 Markdown 格式，再处理 data:image
+  const normalizedContent = useMemo(() => normalizeMarkdown(content), [content])
   const contentWithImages = useMemo(
-    () => content.replace(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`),
-    [content]
+    () => normalizedContent.replace(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`),
+    [normalizedContent]
   )
-
-  // 预处理：修复 AI 返回的不规范 Markdown 格式
-  // CommonMark 规范要求标题(##)、列表(- / 1.)前必须有空行，否则会被解析为普通文本
-  const normalizedContent = useMemo(() => normalizeMarkdown(contentWithImages), [contentWithImages])
 
   return (
     <ReactMarkdown
@@ -207,7 +262,7 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
         },
       }}
     >
-      {normalizedContent}
+      {contentWithImages}
     </ReactMarkdown>
   )
 }
