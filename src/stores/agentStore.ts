@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { AgentMessage } from '../types'
 import * as agentApi from '../api/agent'
 import type { AiAgentConfigDTO, ReActStep } from '../api/agent'
+import { toolProgressStore } from '../components/ToolProgressBar'
 
 interface AgentStore {
   // 当前会话 ID（值 = 服务端返回的 sessionId）
@@ -75,6 +76,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   createServerSession: async (agentId) => {
     const serverSessionId = await agentApi.createSession(agentId)
     if (!serverSessionId) throw new Error('创建会话失败')
+    // 新建会话时清除工具进度条残留状态
+    toolProgressStore.clear()
     const state = get()
     const newSession = {
       id: serverSessionId,
@@ -198,6 +201,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   setLoading: (loading) => set({ isLoading: loading }),
 
   clearMessages: (sessionId: string) => {
+    // 清除消息时同步清除工具进度条残留
+    toolProgressStore.clear()
     set((state) => {
       const sessions = new Map(state.sessions)
       const session = sessions.get(sessionId)
