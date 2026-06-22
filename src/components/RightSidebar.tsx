@@ -19,7 +19,7 @@ import { StreamStatusBar } from './StreamStatusBar'
 import { ErrorRecoveryCard, type ErrorRecovery } from './ErrorRecoveryCard'
 import { TopicDivider, shouldInsertTopicDivider } from './TopicDivider'
 import { CommandMenu, useCommandMenu, type MenuItem } from './CommandMenu'
-import { ToolProgressBar } from './ToolProgressBar'
+import { ToolProgressBar, toolProgressStore } from './ToolProgressBar'
 import { ShortcutHelp } from './ShortcutHelp'
 import { ChatExport } from './ChatExport'
 import { EmptyState } from './EmptyState'
@@ -978,6 +978,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       abortRef.current = null
       setLoading(false)
     }
+    // 清除工具进度条状态，避免停止后进度条仍在跑
+    toolProgressStore.clear()
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
