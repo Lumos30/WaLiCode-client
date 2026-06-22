@@ -3,6 +3,7 @@ import { Header } from '../components/Header'
 import { ActivityBar } from '../components/ActivityBar'
 import { LeftSidebar } from '../components/LeftSidebar'
 import { RightSidebar } from '../components/RightSidebar'
+import { HistoryPanel } from '../components/HistoryPanel'
 import { TerminalContainer } from '../components/TerminalContainer'
 import { SFTPWorkspace } from '../components/SFTPWorkspace'
 import { Settings } from '../components/Settings'
@@ -10,6 +11,7 @@ import { SSHConnectionModal } from '../components/SSHConnectionModal'
 import { useThemeStore } from '../stores/themeStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
+import { useAgentStore } from '../stores/agentStore'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { BottomPanelBar } from '../components/BottomPanelBar'
 
@@ -57,6 +59,17 @@ export function MainView() {
   const [isResizingTerminal, setIsResizingTerminal] = useState(false)
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; tabKey: string } | null>(null)
+
+  // 监听 RightSidebar 触发的 SSH 弹窗事件（来自 /connect 命令）
+  useEffect(() => {
+    const handler = () => {
+      setSshModalOpen(true)
+      setSidebarVisible(true)
+      setActiveTab('servers')
+    }
+    window.addEventListener('open-ssh-modal', handler)
+    return () => window.removeEventListener('open-ssh-modal', handler)
+  }, [])
   const tabsScrollRef = useRef<HTMLDivElement>(null)
   
   // 当前激活的终端会话 ID
@@ -64,6 +77,7 @@ export function MainView() {
   const [isTerminalActive, setIsTerminalActive] = useState(true)
 
   const { colors } = useThemeStore()
+  const showHistoryPanel = useAgentStore((s) => s.showHistoryPanel)
   const { 
     openTabs, 
     activeTabKey, 
@@ -594,6 +608,10 @@ export function MainView() {
             <ErrorBoundary>
               <RightSidebar width={chatWidth} activeTerminalSessionId={activeTerminalSessionId} />
             </ErrorBoundary>
+            {/* 历史面板 - 对话栏右侧展开 */}
+            {showHistoryPanel && (
+              <HistoryPanel width={320} />
+            )}
           </>
         )}
       </div>

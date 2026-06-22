@@ -110,6 +110,18 @@ body {
   animation: slide-in-from-top 0.2s ease-out;
 }
 
+/* 历史面板滑入动画 */
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
 /* 选中文本 */
 ::selection {
   background: rgba(79, 138, 245, 0.35);

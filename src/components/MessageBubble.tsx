@@ -1,4 +1,4 @@
-import React, { memo, useState, useRef } from 'react'
+import React, { memo, useState, useRef, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
@@ -101,6 +101,25 @@ function ThinkingBlock({ content, isStreaming }: { content: string; isStreaming:
   )
 }
 
+// ===== Markdown 预处理：修复 AI 返回的不规范格式 =====
+// CommonMark 规范要求标题、列表前必须有空行，否则会被解析为普通文本
+// AI 经常在同一行中直接跟 ## 标题，或在不空行的地方开始列表
+function normalizeMarkdown(text: string): string {
+  if (!text) return text
+  // 在行内出现的标题标记(## 标题)前插入换行+空行
+  // 匹配：非换行符 + ## (标题) → 在 ## 前插入 \n\n
+  let result = text.replace(/([^\n\s])(#{1,6}\s)/g, '$1\n\n$2')
+  // 在行首的标题标记前确保有空行（如果前一行非空）
+  result = result.replace(/([^\n])\n(#{1,6}\s)/g, '$1\n\n$2')
+  // 在行首的无序列表标记(- , * , + )前插入空行
+  result = result.replace(/([^\n])\n([-*+]\s)/g, '$1\n\n$2')
+  // 在行首的有序列表标记(1. , 2. )前插入空行
+  result = result.replace(/([^\n])\n(\d+\.\s)/g, '$1\n\n$2')
+  // 在代码块标记(​​`​​`)前插入空行
+  result = result.replace(/([^\n])\n(```)/g, '$1\n\n$2')
+  return result
+}
+
 // ===== Markdown 渲染组件 =====
 function MarkdownContent({ content, colors, isUser }: { content: string; colors: ReturnType<typeof useThemeStore.getState>['colors']; isUser?: boolean }) {
   // 用户气泡内的文字色：确保在 userBubble 背景上清晰可读
@@ -111,6 +130,17 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
   if (!content || !content.trim()) {
     return null
   }
+
+  // 预处理：将 data:image URL 转换为 markdown 图片语法，使其能被 ReactMarkdown 渲染为 <img>
+  // 同时保持其他文本内容不变
+  const contentWithImages = useMemo(
+    () => content.replace(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`),
+    [content]
+  )
+
+  // 预处理：修复 AI 返回的不规范 Markdown 格式
+  // CommonMark 规范要求标题(##)、列表(- / 1.)前必须有空行，否则会被解析为普通文本
+  const normalizedContent = useMemo(() => normalizeMarkdown(contentWithImages), [contentWithImages])
 
   return (
     <ReactMarkdown
@@ -161,9 +191,23 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
         td: ({ children }: { children?: React.ReactNode }) => <td className="px-2 py-1 border" style={{ borderColor: colors.border, color: textColor }}>{children}</td>,
         strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-semibold" style={{ color: textColor }}>{children}</strong>,
         em: ({ children }: { children?: React.ReactNode }) => <em>{children}</em>,
+        img: ({ src, alt }: { src?: string; alt?: string }) => {
+          // 只渲染 data:image URL 和 http(s) 图片，过滤掉超长的纯文本误匹配
+          if (!src || src.length < 100) return null
+          return (
+            <img
+              src={src}
+              alt={alt || '上传的图片'}
+              className="max-w-full max-h-64 rounded-lg my-2 object-contain cursor-pointer"
+              style={{ border: `1px solid ${colors.border}40` }}
+              onClick={() => window.open(src, '_blank')}
+              title="点击放大"
+            />
+          )
+        },
       }}
     >
-      {content}
+      {normalizedContent}
     </ReactMarkdown>
   )
 }

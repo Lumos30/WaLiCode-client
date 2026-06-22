@@ -12,6 +12,9 @@ interface AgentStore {
   inputText: string
   // 是否等待响应
   isLoading: boolean
+  // 历史面板是否展开
+  showHistoryPanel: boolean
+  toggleHistoryPanel: () => void
 
   // ===== 智能体列表 =====
   agents: AiAgentConfigDTO[]
@@ -52,6 +55,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   sessions: new Map(),
   inputText: '',
   isLoading: false,
+  showHistoryPanel: false,
+  toggleHistoryPanel: () => set((s) => ({ showHistoryPanel: !s.showHistoryPanel })),
 
   agents: [],
   currentAgentId: null,

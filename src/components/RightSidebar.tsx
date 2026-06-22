@@ -116,6 +116,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   // --- P2: 快捷键面板 & 导出面板 ---
   const [showShortcutHelp, setShowShortcutHelp] = useState(false)
   const [showChatExport, setShowChatExport] = useState(false)
+  // --- 历史记录面板 ---
+  const { showHistoryPanel, toggleHistoryPanel } = useAgentStore()
 
   // --- CommandMenu 状态 ---
   const [cmdMenuTrigger, setCmdMenuTrigger] = useState<'/' | '@' | null>(null)
@@ -343,6 +345,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       if (e.key === 'Escape') {
         setShowShortcutHelp(false)
         setShowChatExport(false)
+        if (useAgentStore.getState().showHistoryPanel) useAgentStore.getState().toggleHistoryPanel()
       }
     }
     window.addEventListener('keydown', handleGlobalKeyDown)
@@ -529,6 +532,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         ? `${plainText}\n\n**参考上下文：**\n${formattedTagsContent}`
         : `**参考上下文：**\n${formattedTagsContent}`
       const displayTags = inputTags.map(tag => {
+        // 图片标签：显示预览而非原始 base64 文本
+        const dataUrlMatch = tag.fullContent.match(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+)/)
+        if (dataUrlMatch) {
+          return `> 📎 **${tag.label}**\n> ![](${dataUrlMatch[1]})`
+        }
         const contentLines = tag.fullContent.split('\n')
         const firstFewLines = contentLines.slice(0, 3).join(' ')
         const preview = firstFewLines.length > 80 ? firstFewLines.substring(0, 80) + '...' : firstFewLines
@@ -1016,7 +1024,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const canSend = (inputRef.current?.innerText.trim() || inputTags.length > 0) && currentAgentId && !isLoading
 
   return (
-    <div className="flex flex-col h-full flex-shrink-0 overflow-hidden" style={{ width, backgroundColor: colors.bgPrimary }}>
+    <div className="relative flex flex-col h-full flex-shrink-0 overflow-hidden" style={{ width, backgroundColor: colors.bgPrimary }}>
       <PermissionConfirmModal />
       <StreamStatusBar />
       {/* 工具进度条 */}
@@ -1187,6 +1195,12 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         </div>
 
         <div className="flex items-center gap-2">
+          <button onClick={() => currentAgentId && newConversation(currentAgentId)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="新建会话">
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </button>
           <button onClick={() => setShowChatExport(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="导出对话">
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -1195,24 +1209,12 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             </svg>
           </button>
           <button onClick={() => setShowShortcutHelp(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="快捷键">
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="2" y="4" width="20" height="16" rx="2" />
-              <line x1="6" y1="8" x2="6" y2="8" />
-              <line x1="10" y1="8" x2="10" y2="8" />
-              <line x1="14" y1="8" x2="14" y2="8" />
-              <line x1="18" y1="8" x2="18" y2="8" />
-              <line x1="6" y1="12" x2="6" y2="12" />
-              <line x1="18" y1="12" x2="18" y2="12" />
-              <line x1="8" y1="16" x2="16" y2="16" />
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="6" width="20" height="12" rx="2" />
+              <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M8 14h8" />
             </svg>
           </button>
-          <button onClick={() => currentAgentId && newConversation(currentAgentId)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="新建会话">
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-          </button>
-          <button className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="历史记录">
+          <button onClick={toggleHistoryPanel} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: showHistoryPanel ? `${colors.accent}20` : colors.bgTertiary, color: showHistoryPanel ? colors.accent : colors.textSecondary, border: `1px solid ${showHistoryPanel ? `${colors.accent}40` : 'transparent'}` }} title="历史记录">
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="10"></circle>
               <polyline points="12 6 12 12 16 14"></polyline>
@@ -1333,8 +1335,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             <div className="relative">
               <button onClick={(e) => { e.stopPropagation(); setShowAttachmentMenu(!showAttachmentMenu) }} className="p-1.5 rounded-md transition-colors hover:bg-black/10" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary }} title="添加上下文">
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
                 </svg>
               </button>
               {showAttachmentMenu && (
@@ -1351,13 +1352,37 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                 </div>
               )}
             </div>
-            <button disabled className="p-1.5 rounded-md cursor-not-allowed" style={{ backgroundColor: colors.bgTertiary, color: colors.textDim, opacity: 0.5 }} title="功能开发中">
+            <label className="p-1.5 rounded-md transition-colors hover:bg-black/10 cursor-pointer" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary }} title="上传图片">
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
                 <circle cx="8.5" cy="8.5" r="1.5"></circle>
                 <polyline points="21 15 16 10 5 21"></polyline>
               </svg>
-            </button>
+              <input
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (!file) return
+                  const reader = new FileReader()
+                  reader.onload = (ev) => {
+                    const dataUrl = ev.target?.result as string
+                    if (!dataUrl) return
+                    // 将图片作为上下文标签插入输入框
+                    insertTagAtCursor({
+                      id: `img_${Date.now()}`,
+                      label: `图片: ${file.name}`,
+                      fullContent: `[图片: ${file.name}]\n${dataUrl}`,
+                      type: 'custom',
+                    })
+                  }
+                  reader.readAsDataURL(file)
+                  // 重置 input 以允许重复选择同一文件
+                  e.target.value = ''
+                }}
+              />
+            </label>
             {isLoading ? (
               <button onClick={handleStop} className="p-1.5 rounded-md transition-colors" style={{ backgroundColor: colors.red, color: '#fff' }} title="停止">
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
@@ -1398,6 +1423,17 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                     sel?.removeAllRanges()
                     sel?.addRange(range)
                   }
+                } else if (item.id === 'connect') {
+                  // 打开 SSH 连接配置弹窗，切换到服务器标签
+                  window.dispatchEvent(new CustomEvent('open-ssh-modal'))
+                } else if (item.id === 'disconnect') {
+                  // 断开当前活跃连接
+                  const conn = activeBinding
+                    ? connections.find(c => c.id === activeBinding.connectionId)
+                    : connections.find(c => c.id === currentConnectionId)
+                  if (conn) {
+                    useConnectionStore.getState().disconnect(conn.id)
+                  }
                 } else if (item.id === 'clear') {
                   if (currentSessionId) useAgentStore.getState().clearMessages(currentSessionId)
                 } else if (item.id === 'reset') {
@@ -1414,6 +1450,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                     a.download = `对话_${new Date().toISOString().slice(0, 10)}.md`
                     a.click()
                     URL.revokeObjectURL(url)
+                  }
+                } else if (item.id === 'debug') {
+                  // 调试模式：发送提示让 AI 显示详细执行过程
+                  if (inputRef.current) {
+                    inputRef.current.innerText = '请开启调试模式，显示详细的 ReAct 执行过程'
+                    setInputText(inputRef.current.innerText)
+                  }
+                } else if (item.id === 'help') {
+                  // 帮助：发送提示让 AI 列出可用命令
+                  if (inputRef.current) {
+                    inputRef.current.innerText = '请列出可用的命令和快捷键'
+                    setInputText(inputRef.current.innerText)
                   }
                 }
               } else {

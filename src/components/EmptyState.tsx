@@ -48,6 +48,42 @@ const CAPABILITIES: CapabilityCard[] = [
     description: '构建部署、版本回滚',
     prompt: '帮我检查最近的部署状态',
   },
+  {
+    icon: '🏗️',
+    title: '架构分析',
+    description: '分析项目结构、依赖关系、代码质量',
+    prompt: '帮我分析当前项目的架构和模块依赖关系',
+  },
+  {
+    icon: '🐛',
+    title: 'Bug 修复',
+    description: '定位 Bug、分析根因、生成修复方案',
+    prompt: '帮我分析这段代码中的 Bug 并给出修复方案',
+  },
+  {
+    icon: '✨',
+    title: '代码生成',
+    description: '生成新功能代码、补全实现、编写测试',
+    prompt: '帮我生成一个 RESTful API 接口实现',
+  },
+  {
+    icon: '📝',
+    title: '代码审查',
+    description: '审查代码变更、检测潜在问题、优化建议',
+    prompt: '帮我审查最近的代码变更并给出优化建议',
+  },
+  {
+    icon: '🔧',
+    title: '配置管理',
+    description: '管理应用配置、环境变量、CI/CD 流水线',
+    prompt: '帮我检查和优化当前的配置文件',
+  },
+  {
+    icon: '🐳',
+    title: '容器化',
+    description: 'Docker 镜像构建、K8s 部署、容器编排',
+    prompt: '帮我为当前项目编写 Dockerfile 和部署配置',
+  },
 ]
 
 /**
@@ -68,15 +104,15 @@ export function EmptyState({ onQuickAction }: EmptyStateProps) {
           <span className="text-2xl">🤖</span>
         </div>
         <h2 className="text-[15px] font-semibold mb-1" style={{ color: colors.text }}>
-          SSH 智能运维助手
+          AI DevOps 智能助手
         </h2>
         <p className="text-[12px] text-center max-w-[280px]" style={{ color: colors.textDim }}>
-          连接服务器后，用自然语言完成运维操作
+          从服务器运维到代码开发，用自然语言完成全栈 DevOps 操作
         </p>
       </div>
 
       {/* 能力卡片网格 */}
-      <div className="grid grid-cols-2 gap-2.5 w-full max-w-[400px] mb-6">
+      <div className="grid grid-cols-2 gap-2.5 w-full max-w-[480px] mb-6 max-h-[360px] overflow-y-auto pr-1">
         {CAPABILITIES.map((cap) => (
           <button
             key={cap.title}

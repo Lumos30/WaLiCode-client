@@ -34,6 +34,8 @@ interface CommandMenuProps {
 
 // ===== 预定义 / 命令 =====
 const SLASH_COMMANDS: MenuItem[] = [
+  { id: 'connect', label: '连接服务器', description: '打开 SSH 连接配置', icon: '🔌', insertText: '' },
+  { id: 'disconnect', label: '断开连接', description: '断开当前 SSH 连接', icon: '⚡', insertText: '' },
   { id: 'clear', label: '清空对话', description: '清除当前会话所有消息', icon: '🗑️', insertText: '' },
   { id: 'reset', label: '重置上下文', description: '清除上下文但保留消息', icon: '🔄', insertText: '' },
   { id: 'export', label: '导出对话', description: '导出为 Markdown 文件', icon: '📥', insertText: '' },
