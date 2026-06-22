@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { animateThemeChange } from '../utils/themeTransition'
 
 export type ThemeName = 'dark' | 'light' | 'midnight' | 'forest' | 'system'
 
@@ -189,15 +190,18 @@ export const useThemeStore = create<ThemeStore>((set) => ({
   colors: resolveThemeColors(initialTheme),
 
   setTheme: (name) => {
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, name)
-    } catch {
-      // localStorage 不可用时忽略
-    }
-    applyThemeToDOM(name)
-    set({
-      currentTheme: name,
-      colors: resolveThemeColors(name),
+    // 使用 View Transitions API 实现平滑主题切换
+    animateThemeChange(() => {
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, name)
+      } catch {
+        // localStorage 不可用时忽略
+      }
+      applyThemeToDOM(name)
+      set({
+        currentTheme: name,
+        colors: resolveThemeColors(name),
+      })
     })
   },
 }))

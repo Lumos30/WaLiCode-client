@@ -7,6 +7,9 @@ import { useThemeStore } from '../stores/themeStore'
 import type { AgentMessage } from '../types'
 import type { ReActStep } from '../api/agent'
 import { SessionSummaryCard } from './SessionSummaryCard'
+import { TypewriterRenderer } from './TypewriterRenderer'
+import { MessageActionMenu } from './MessageActionMenu'
+import { CollapsibleContent } from './CollapsibleContent'
 
 // ===== 代码块组件 =====
 function CodeBlock({ className, children }: { className?: string; children?: React.ReactNode }) {
@@ -103,12 +106,28 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
   // 用户气泡内的文字色：确保在 userBubble 背景上清晰可读
   const textColor = isUser ? colors.userBubbleText : colors.text
   const linkColor = isUser ? '#93c5fd' : colors.accent  // 用户消息用亮蓝链接，AI 消息用主题 accent
+
+  // 如果 content 为空或 undefined，不渲染
+  if (!content || !content.trim()) {
+    return null
+  }
+
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       rehypePlugins={[[rehypeHighlight, { languages: all, aliases: { vue: 'xml', ts: 'typescript', tsx: 'typescript', jsx: 'javascript' } }]]}
       components={{
-        code: ({ className, children }: { className?: string; children?: React.ReactNode }) => <CodeBlock className={className}>{children}</CodeBlock>,
+        // 自定义 pre：避免 react-markdown 默认 pre 与 CodeBlock 内部 pre 嵌套
+        pre: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
+        code: ({ className, children }: { className?: string; children?: React.ReactNode }) => {
+          // 判断是否为代码块（父节点为 pre）或行内代码
+          const isBlock = className?.startsWith('language-') || (typeof children === 'string' && children.includes('\n'))
+          if (isBlock) {
+            return <CodeBlock className={className}>{children}</CodeBlock>
+          }
+          // 行内代码
+          return <code className="px-1 py-0.5 rounded text-[12px]" style={{ backgroundColor: `${colors.border}30`, fontFamily: '"SF Mono", "JetBrains Mono", monospace', color: colors.text }}>{children}</code>
+        },
         p: ({ children }: { children?: React.ReactNode }) => <p className="m-0 mb-2 last:mb-0 leading-relaxed">{children}</p>,
         a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
           <a href={href} target="_blank" rel="noopener noreferrer" className="underline cursor-pointer" style={{ color: linkColor }}>
@@ -582,6 +601,12 @@ const ToolGroupView = memo(function ToolGroupView({ group, colors, compact }: {
 })
 
 // ===== ProcessTimeline（从 RightSidebar 迁移）=====
+// 三级展开模式
+// 'collapsed' — 摘要单行
+// 'compact' — 紧凑模式（单行无背景），失败项高亮
+// 'expanded' — 完整展开
+type ExpandMode = 'collapsed' | 'compact' | 'expanded'
+
 function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   steps: ReActStep[]
   colors: ReturnType<typeof useThemeStore.getState>['colors']
@@ -592,19 +617,21 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   if (processSteps.length === 0) return null
 
   const allDone = processSteps.every(s => s.status !== 'in_progress')
-  // 对话完成时默认折叠
-  const [collapsed, setCollapsed] = useState(() => true)
+  // 三级展开模式：collapsed → compact → expanded
+  const [expandMode, setExpandMode] = useState<ExpandMode>('collapsed')
+  // 仅显示失败筛选
+  const [showFailuresOnly, setShowFailuresOnly] = useState(false)
   // 追踪流式状态跳变
   const prevStreamingRef = useRef(isStreaming || isLoading)
-  // 追踪用户是否手动操作过折叠/展开
+  // 追踪用户是否手动操作过
   const userToggledRef = useRef(false)
-  // 是否已经触发过自动折叠（防止重复）
+  // 是否已经触发过自动折叠
   const autoCollapsedRef = useRef(false)
 
   React.useEffect(() => {
     // 流式/加载中 → 强制展开
-    if ((isStreaming || isLoading) && collapsed) {
-      setCollapsed(false)
+    if ((isStreaming || isLoading) && expandMode !== 'expanded') {
+      setExpandMode('expanded')
       autoCollapsedRef.current = false
     }
   }, [isStreaming, isLoading])
@@ -616,7 +643,7 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     prevStreamingRef.current = nowStreaming
     if (wasStreaming && !nowStreaming && allDone && !userToggledRef.current && !autoCollapsedRef.current) {
       const timer = setTimeout(() => {
-        setCollapsed(true)
+        setExpandMode('collapsed')
         autoCollapsedRef.current = true
       }, 1500)
       return () => clearTimeout(timer)
@@ -637,10 +664,29 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   // 工具分组
   const toolGroups = groupToolSteps(toolSteps)
   // 紧凑模式：完成态 >6 步骤
-  const useCompactMode = !isStreaming && !isLoading && allDone && processSteps.length > 6
+  const useCompactMode = expandMode === 'compact' || (!isStreaming && !isLoading && allDone && processSteps.length > 6 && expandMode === 'expanded')
 
   // 折叠状态摘要
   const collapsedSummary = buildCollapsedSummary(toolGroups)
+
+  // 筛选后的步骤（仅显示失败时）
+  const filteredToolGroups = showFailuresOnly
+    ? toolGroups.map(g => ({ ...g, steps: g.steps.filter(s => s.status === 'failure') })).filter(g => g.steps.length > 0)
+    : toolGroups
+  const filteredThinkingSteps = showFailuresOnly ? [] : thinkingSteps
+
+  // 循环切换展开模式：collapsed → compact → expanded → collapsed
+  const cycleExpandMode = () => {
+    userToggledRef.current = true
+    setExpandMode(prev => prev === 'collapsed' ? 'compact' : prev === 'compact' ? 'expanded' : 'collapsed')
+  }
+
+  // 展开/折叠图标根据模式变化
+  const expandIcon = expandMode === 'collapsed'
+    ? '▶'  // 折叠
+    : expandMode === 'compact'
+    ? '▶▶' // 紧凑
+    : '▼'  // 展开
 
   return (
     <div className="mb-2 rounded-lg overflow-hidden min-w-0" style={{
@@ -648,14 +694,12 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
       backgroundColor: `${colors.bgSecondary}60`,
     }}>
       <button
-        onClick={() => { userToggledRef.current = true; setCollapsed(!collapsed) }}
+        onClick={cycleExpandMode}
         className="w-full flex items-center gap-2 px-3 py-2 transition-colors hover:bg-black/5 overflow-hidden"
         style={{ color: colors.textDim }}
       >
-        <svg className={`w-3.5 h-3.5 transition-transform duration-200 flex-shrink-0 ${collapsed ? 'rotate-0' : '-rotate-90'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-        {collapsed ? (
+        <span className="text-[10px] flex-shrink-0 font-mono" style={{ width: '16px', textAlign: 'center' }}>{expandIcon}</span>
+        {expandMode === 'collapsed' ? (
           <>
             <span className="text-[11px] font-medium select-none truncate flex-1 min-w-0" style={{ color: colors.textSecondary }}>
               {collapsedSummary}
@@ -668,7 +712,7 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
         ) : (
           <>
             <span className="text-[11px] font-medium select-none flex-shrink-0">
-              收起过程
+              {expandMode === 'compact' ? '紧凑模式' : '收起过程'}
             </span>
             <span className="text-[11px] font-medium tabular-nums flex-shrink-0" style={{ color: colors.textSecondary }}>
               {toolCount > 0 && `${toolCount} 次工具`}
@@ -709,16 +753,36 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
           }}
         />
       </div>
-      {!collapsed && (
+      {expandMode !== 'collapsed' && (
         <div className="px-2 pb-2 space-y-1.5 animate-in slide-in-from-top-1 duration-200">
+          {/* 工具栏：仅显示失败筛选 + 模式切换提示 */}
+          {failCount > 0 && expandMode === 'expanded' && (
+            <div className="flex items-center gap-2 px-2 py-1" style={{ borderBottom: `1px solid ${colors.border}20` }}>
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowFailuresOnly(!showFailuresOnly) }}
+                className="text-[10px] px-2 py-0.5 rounded-full transition-colors flex items-center gap-1"
+                style={{
+                  backgroundColor: showFailuresOnly ? 'rgba(239,68,68,0.15)' : `${colors.bgTertiary}`,
+                  color: showFailuresOnly ? '#ef4444' : colors.textDim,
+                  border: `1px solid ${showFailuresOnly ? 'rgba(239,68,68,0.3)' : colors.border}40`,
+                }}
+              >
+                {showFailuresOnly ? '◉' : '○'} 仅显示失败 ({failCount})
+              </button>
+              <span className="text-[9px]" style={{ color: colors.textDim }}>点击标题栏切换展开级别</span>
+            </div>
+          )}
           {/* 思考步骤正常展示 */}
-          {thinkingSteps.map((step, i) => (
+          {filteredThinkingSteps.map((step, i) => (
             <ThinkingStepView key={`think-${i}`} step={step} colors={colors} compact={useCompactMode} />
           ))}
           {/* 工具按分组展示 */}
-          {toolGroups.map((group, i) => (
+          {filteredToolGroups.map((group, i) => (
             <ToolGroupView key={`group-${i}`} group={group} colors={colors} compact={useCompactMode} />
           ))}
+          {showFailuresOnly && filteredToolGroups.length === 0 && (
+            <div className="px-3 py-2 text-[11px]" style={{ color: colors.textDim }}>🎉 无失败步骤</div>
+          )}
         </div>
       )}
     </div>
@@ -795,6 +859,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
 }) {
   const { colors } = useThemeStore()
   const isUser = message.role === 'user'
+  const [isBookmarked, setIsBookmarked] = useState(false)
 
   // 对于有 steps 的 assistant 消息，复制按钮应使用最终展示内容
   const copyText = isUser ? message.content : (message.steps && message.steps.length > 0
@@ -826,7 +891,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
 
   // ===== 有 steps 的 assistant 消息 =====
   if (message.steps && message.steps.length > 0) {
-    const resultStep = message.steps.find(s => s.stepType === 'result' && s.content)
+    const resultStep = message.steps.find(s => s.stepType === 'result' && s.content !== undefined)
     const hasProcessSteps = message.steps.some(s => s.stepType !== 'result')
     const displayContent = resultStep?.content || message.content
     const isStreaming = !resultStep && message.content === ''
@@ -835,8 +900,19 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
     const contentParts = displayContent ? splitThinkTags(displayContent) : []
 
     return (
-      <div className="px-4 py-1.5 flex justify-start overflow-hidden">
+      <div className="group/msg relative px-4 py-1.5 flex justify-start overflow-hidden">
         <div className="flex flex-col items-start max-w-[88%] min-w-0">
+          {/* 浮动操作菜单 */}
+          <div className="absolute top-1 right-2 z-10">
+            <MessageActionMenu
+              isUser={false}
+              isBookmarked={isBookmarked}
+              onCopy={() => navigator.clipboard.writeText(copyText)}
+              onQuote={() => {/* TODO: quote into input */}}
+              onRegenerate={() => {/* TODO: regenerate */}}
+              onToggleBookmark={() => setIsBookmarked(!isBookmarked)}
+            />
+          </div>
           {/* 过程时间线 */}
           {hasProcessSteps && (
             <ProcessTimeline
@@ -846,8 +922,9 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
               isLoading={isLoading}
             />
           )}
-          {/* AI 回复内容（带 think 标签解析） */}
+          {/* AI 回复内容（带 think 标签解析 + 流式打字机效果 + 超长折叠） */}
           {contentParts.length > 0 ? (
+            <CollapsibleContent contentLength={displayContent?.length || 0} forceExpanded={isStreaming || isLoading}>
             <div
               className="px-3.5 py-2.5 text-[13px] leading-relaxed overflow-hidden min-w-0"
               style={{
@@ -862,9 +939,21 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
                   return <ThinkingBlock key={idx} content={part.content} isStreaming={part.isStreaming || false} />
                 }
                 if (!part.content.trim()) return null
+                // 流式输出时启用打字机效果
+                if (isStreaming || (isLoading && part.isStreaming)) {
+                  return (
+                    <TypewriterRenderer
+                      key={idx}
+                      fullText={part.content}
+                      isLoading={isLoading || isStreaming}
+                      renderContent={(text) => <MarkdownContent content={text} colors={colors} />}
+                    />
+                  )
+                }
                 return <MarkdownContent key={idx} content={part.content} colors={colors} />
               })}
             </div>
+            </CollapsibleContent>
           ) : !resultStep && !displayContent ? (
             /* 流式加载指示器 */
             <div className="px-3.5 py-2.5 flex items-center gap-2" style={{ backgroundColor: colors.bgTertiary, borderRadius: '12px 12px 12px 2px' }}>
@@ -889,8 +978,20 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
   const contentParts = message.content ? splitThinkTags(message.content) : []
 
   return (
-    <div className={`px-4 py-1.5 ${isUser ? 'flex justify-end' : 'flex justify-start'} overflow-hidden`}>
+    <div className={`group/msg relative px-4 py-1.5 ${isUser ? 'flex justify-end' : 'flex justify-start'} overflow-hidden`}>
       <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[88%] min-w-0`}>
+        {/* 浮动操作菜单 */}
+        <div className={`absolute top-1 ${isUser ? 'left-2' : 'right-2'} z-10`}>
+          <MessageActionMenu
+            isUser={isUser}
+            isBookmarked={isBookmarked}
+            onCopy={() => navigator.clipboard.writeText(message.content)}
+            onEdit={isUser && onEditRetry ? () => onEditRetry(message.id) : undefined}
+            onQuote={() => {/* TODO: quote into input */}}
+            onRegenerate={!isUser ? () => {/* TODO: regenerate */} : undefined}
+            onToggleBookmark={() => setIsBookmarked(!isBookmarked)}
+          />
+        </div>
         <div
           className="w-full px-3.5 py-2.5 text-[13px] leading-relaxed overflow-hidden"
           style={{

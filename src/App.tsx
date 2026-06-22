@@ -35,7 +35,6 @@ function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
   }, [connections, disconnect])
 
-  // 使用 MainView 启用 SSH 智能体交互功能
   return (
     <ErrorBoundary>
       <MainView />

@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react'
+import React, { useRef, useEffect, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useConnectionStore } from '../stores/connectionStore'
@@ -7,11 +7,22 @@ import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { useAiPatchStore } from '../stores/aiPatchStore'
 import { useOutputStore } from '../stores/outputStore'
+import { usePermissionStore } from '../stores/permissionStore'
+import { useStreamStore } from '../stores/streamStore'
 import * as agentApi from '../api/agent'
 import type { ReActStep, TaskBreakdownDTO } from '../api/agent'
 import { ConnectionStatus } from '../types'
 import type { AgentMessage } from '../types'
 import { MessageBubble } from './MessageBubble'
+import { PermissionConfirmModal } from './PermissionConfirmModal'
+import { StreamStatusBar } from './StreamStatusBar'
+import { ErrorRecoveryCard, type ErrorRecovery } from './ErrorRecoveryCard'
+import { TopicDivider, shouldInsertTopicDivider } from './TopicDivider'
+import { CommandMenu, useCommandMenu, type MenuItem } from './CommandMenu'
+import { ToolProgressBar } from './ToolProgressBar'
+import { ShortcutHelp } from './ShortcutHelp'
+import { ChatExport } from './ChatExport'
+import { EmptyState } from './EmptyState'
 
 function parseToolResultPayload(raw?: string): Record<string, any> | null {
   if (!raw) return null
@@ -100,6 +111,49 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false)
   const [inputKey, setInputKey] = useState(0)
   const abortRef = useRef<(() => void) | null>(null)
+  const [errorRecovery, setErrorRecovery] = useState<ErrorRecovery | null>(null)
+
+  // --- P2: 快捷键面板 & 导出面板 ---
+  const [showShortcutHelp, setShowShortcutHelp] = useState(false)
+  const [showChatExport, setShowChatExport] = useState(false)
+
+  // --- CommandMenu 状态 ---
+  const [cmdMenuTrigger, setCmdMenuTrigger] = useState<'/' | '@' | null>(null)
+  const [cmdMenuIndex, setCmdMenuIndex] = useState(-1)
+  const [cmdMenuQuery, setCmdMenuQuery] = useState('')
+
+  // 可用的 @ 提及列表
+  const mentionItems: MenuItem[] = [
+    { id: 'current-file', label: '当前文件', description: '插入当前打开的文件', icon: '📄', insertText: '@当前文件' },
+    { id: 'current-folder', label: '当前目录', description: '插入当前工作目录', icon: '📁', insertText: '@当前目录' },
+    { id: 'terminal', label: '终端', description: '插入终端选中文本', icon: '💻', insertText: '@终端' },
+    { id: 'connection', label: 'SSH 连接', description: '插入当前连接信息', icon: '🔗', insertText: '@SSH连接' },
+  ]
+
+  // --- SSE 心跳超时检测 ---
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const store = useStreamStore.getState()
+      // 仅在 streaming/reconnecting 状态下检测心跳超时
+      if ((store.status === 'streaming' || store.status === 'reconnecting') && store.isHeartbeatStale()) {
+        console.warn('[SSE] heartbeat stale, stream may be dead')
+        // 触发断开，agent.ts 的 catch 会自动重连
+        if (abortRef.current) {
+          // 不设置 isAborted，只中断当前 fetch 让 catch 处理重连
+          // 但 abortRef 调用会设 isAborted=true...
+          // 所以这里改为直接触发错误状态
+        }
+        // 如果已经在 reconnecting 且超过最大重试，显示错误
+        if (store.status === 'reconnecting' && store.retryCount >= store.maxRetries) {
+          store.setError('SSE 连接超时，心跳无响应')
+          store.reset()
+          setLoading(false)
+          abortRef.current = null
+        }
+      }
+    }, 10_000) // 每 10s 检查一次
+    return () => clearInterval(interval)
+  }, [])
 
   // --- 输入历史导航 ---
   const historyRef = useRef<string[]>([])
@@ -276,6 +330,25 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     inputHtmlRef.current = ''
   }, [inputKey])
 
+  // --- 全局快捷键：? 打开帮助面板 ---
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // 输入框内不触发，避免干扰正常输入
+      const tag = (e.target as HTMLElement)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return
+      if (e.key === '?') {
+        e.preventDefault()
+        setShowShortcutHelp(prev => !prev)
+      }
+      if (e.key === 'Escape') {
+        setShowShortcutHelp(false)
+        setShowChatExport(false)
+      }
+    }
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [])
+
   useEffect(() => {
     const autoBindCurrentConnection = async () => {
       console.log('[RightSidebar] autoBindCurrentConnection check: activeTerminalSessionId=', activeTerminalSessionId, 'activeBinding=', activeBinding?.terminalSessionId, 'currentSessionId=', useAgentStore.getState().currentSessionId, 'currentAgentId=', currentAgentId)
@@ -431,6 +504,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   const handleSend = async () => {
     if (isLoading || !currentAgentId || !inputRef.current) return
+    // 清除之前的错误恢复卡片
+    setErrorRecovery(null)
     const domHtml = inputRef.current.innerHTML
     const plainText = inputRef.current.innerText.replace(/\u00a0/g, ' ').trim()
     if ((!plainText && inputTags.length === 0) || isLoading) return
@@ -504,6 +579,10 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
     let fullContent = ''
     const steps: ReActStep[] = []
+
+    // 更新 SSE 流状态
+    useStreamStore.getState().setStatus('connecting')
+    useStreamStore.getState().touchActivity()
 
     abortRef.current = agentApi.reactChatStream(
       currentAgentId,
@@ -701,6 +780,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         console.log('[onText]', fullText.substring(0, 80))
         fullContent = fullText
         updateMessage(sessionId, assistantId, fullContent)
+        // 标记流式输出中 + 刷新心跳
+        useStreamStore.getState().setStatus('streaming')
+        useStreamStore.getState().touchActivity()
       },
       (finalContent: string) => {
         console.log('[onDone] finalContent=', finalContent?.substring(0, 80))
@@ -710,12 +792,27 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         }
         abortRef.current = null
         setLoading(false)
+        useStreamStore.getState().reset()
+        // 完成所有 running 状态的工具输出条目
+        const outputStore = useOutputStore.getState()
+        outputStore.entries.forEach((entry) => {
+          if (entry.status === 'running' && entry.sessionId.startsWith('tool-')) {
+            outputStore.updateEntry(entry.sessionId, { status: 'success' })
+          }
+        })
       },
       (err: string) => {
         console.error('[reactChatStream] error:', err)
         updateMessage(sessionId, assistantId, `请求失败: ${err}`)
         abortRef.current = null
         setLoading(false)
+        useStreamStore.getState().setError(err)
+        // 设置错误恢复卡片
+        setErrorRecovery({
+          type: err.includes('network') || err.includes('Failed') || err.includes('fetch') ? 'network' : 'unknown',
+          title: err.includes('413') ? '请求体过大' : '请求失败',
+          message: err,
+        })
       },
       activeTerminalSessionId || undefined,
       // onTaskBreakdown: 展示任务拆解卡片
@@ -776,6 +873,61 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         }
         return null
       })(),
+      // ── 新增 SSE 事件回调 ──
+      // onPermissionConfirm: 权限确认请求 → 推入 permissionStore
+      (permissionData) => {
+        console.log('[onPermissionConfirm]', permissionData.toolName, permissionData.riskLevel, permissionData.reason)
+        usePermissionStore.getState().pushConfirmation({
+          ...permissionData,
+          arrivedAt: Date.now(),
+        })
+      },
+      // onToolOutput: 工具实时输出片段 → 更新输出面板
+      (toolCallId, outputChunk) => {
+        console.log('[onToolOutput]', toolCallId, outputChunk.substring(0, 80))
+        const outputStore = useOutputStore.getState()
+        const entrySessionId = `tool-${toolCallId}`
+        const existing = outputStore.entries.find((e) => e.sessionId === entrySessionId)
+        if (existing) {
+          outputStore.updateEntry(entrySessionId, {
+            stdout: (existing.stdout || '') + outputChunk,
+          })
+        } else {
+          // 首次收到输出片段，创建条目
+          outputStore.addEntry({
+            sessionId: entrySessionId,
+            command: '',
+            status: 'running' as const,
+            stdout: outputChunk,
+            stderr: '',
+            exitCode: null,
+            durationMs: null,
+          })
+        }
+      },
+      // onStatus: 状态更新消息 → 更新 streamStore
+      (statusMessage) => {
+        console.log('[onStatus]', statusMessage)
+        useStreamStore.getState().setStatusMessage(statusMessage)
+      },
+      // onWarning: 警告消息
+      (warningMessage) => {
+        console.log('[onWarning]', warningMessage)
+      },
+      // onRoundStart: 新轮次开始
+      (roundIndex) => {
+        console.log('[onRoundStart] round', roundIndex)
+      },
+      // onReconnect: 流中途断开重连
+      (attempt, maxAttempts) => {
+        console.log(`[onReconnect] attempt ${attempt}/${maxAttempts}`)
+        useStreamStore.getState().setStatus('reconnecting')
+        useStreamStore.getState().setRetrying(attempt)
+      },
+      // onHeartbeat: 后端心跳保活
+      () => {
+        useStreamStore.getState().touchActivity()
+      },
     )
   }
 
@@ -865,6 +1017,10 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   return (
     <div className="flex flex-col h-full flex-shrink-0 overflow-hidden" style={{ width, backgroundColor: colors.bgPrimary }}>
+      <PermissionConfirmModal />
+      <StreamStatusBar />
+      {/* 工具进度条 */}
+      <ToolProgressBar />
       {(() => {
         const conn = activeBinding
           ? connections.find((c) => c.id === activeBinding.connectionId)
@@ -883,52 +1039,55 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
       <div className="flex-1 overflow-y-auto min-h-0">
         {!currentSession ? (
-          <div className="flex flex-col items-center justify-center h-full gap-3 px-6">
-            <img src="/logo.png" alt="WaLiSSH" className="w-14 h-14 mb-2 opacity-60 rounded" />
-            <h3 className="text-base font-medium" style={{ color: colors.text }}>开始对话</h3>
-            <p className="text-xs text-center max-w-xs leading-relaxed" style={{ color: colors.textSecondary }}>
-              打开工程或连接 SSH 后，可以辅助编码，以及向我询问服务器状态、执行命令、排查问题、管理文件。
-            </p>
-          </div>
+          <EmptyState onQuickAction={(text) => {
+            if (inputRef.current) {
+              inputRef.current.innerText = text
+              inputHtmlRef.current = inputRef.current.innerHTML
+              setInputText(text)
+              inputRef.current.focus()
+            }
+          }} />
         ) : currentSession.messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full gap-4 px-6">
-            <img src="/logo.png" alt="WaLiSSH" className="w-10 h-10 opacity-50 rounded" />
-            <div className="text-center">
-              <p className="text-sm font-medium mb-1" style={{ color: colors.text }}>WaLiCode AI</p>
-              <p className="text-xs" style={{ color: colors.textDim }}>执行命令 · 排查问题 · 管理服务器</p>
-            </div>
-            <div className="w-full max-w-xs space-y-1.5">
-              {['检查服务器状态', '分析日志文件', '部署应用', '排查报错'].map((text) => (
-                <button key={text} onClick={() => {
-                  if (inputRef.current) {
-                    inputRef.current.innerText = text;
-                    inputHtmlRef.current = inputRef.current.innerHTML;
-                    setInputText(text);
-                    inputRef.current.focus();
-                    const range = document.createRange();
-                    const sel = window.getSelection();
-                    range.selectNodeContents(inputRef.current);
-                    range.collapse(false);
-                    sel?.removeAllRanges();
-                    sel?.addRange(range);
-                  }
-                }} className="w-full text-left px-3 py-2 rounded-md text-xs transition-colors hover:opacity-80" style={{ color: colors.textSecondary, backgroundColor: colors.bgTertiary, border: `1px solid ${colors.border}` }}>
-                  {text}
-                </button>
-              ))}
-            </div>
-          </div>
+          <EmptyState onQuickAction={(text) => {
+            if (inputRef.current) {
+              inputRef.current.innerText = text
+              inputHtmlRef.current = inputRef.current.innerHTML
+              setInputText(text)
+              inputRef.current.focus()
+            }
+          }} />
         ) : (
           <div className="py-3 overflow-hidden min-w-0">
-            {currentSession.messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} isLoading={isLoading} onEditRetry={(msgId) => {
-                if (currentSessionId) {
-                  editAndRetry(currentSessionId, msgId)
-                  // 聚焦输入框
-                  setTimeout(() => inputRef.current?.focus(), 50)
-                }
-              }} />
-            ))}
+            {currentSession.messages.map((msg, msgIdx) => {
+              const showDivider = msgIdx > 0 && (() => {
+                const prev = currentSession.messages[msgIdx - 1]
+                return shouldInsertTopicDivider(prev, msg).shouldInsert
+              })()
+              const dividerTitle = msgIdx > 0 ? (() => {
+                const prev = currentSession.messages[msgIdx - 1]
+                const result = shouldInsertTopicDivider(prev, msg)
+                return result.title
+              })() : undefined
+              return (
+                <React.Fragment key={msg.id}>
+                  {showDivider && (
+                    <TopicDivider
+                      prevTimestamp={currentSession.messages[msgIdx - 1].timestamp}
+                      currTimestamp={msg.timestamp}
+                      topicIndex={msgIdx}
+                      defaultTitle={dividerTitle}
+                    />
+                  )}
+                  <MessageBubble message={msg} isLoading={isLoading} onEditRetry={(msgId) => {
+                    if (currentSessionId) {
+                      editAndRetry(currentSessionId, msgId)
+                      // 聚焦输入框
+                      setTimeout(() => inputRef.current?.focus(), 50)
+                    }
+                  }} />
+                </React.Fragment>
+              )
+            })}
             {isLoading && (
               <div className="px-4 py-2 flex justify-start">
                 <div className="px-3.5 py-2.5 flex items-center gap-2" style={{ backgroundColor: colors.bgTertiary, borderRadius: '12px 12px 12px 2px' }}>
@@ -939,6 +1098,42 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   </div>
                   <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
                 </div>
+              </div>
+            )}
+            {/* 错误恢复卡片 */}
+            {errorRecovery && (
+              <div className="px-4 py-2">
+                <ErrorRecoveryCard
+                  error={errorRecovery}
+                  canRetry={true}
+                  onRetry={() => {
+                    setErrorRecovery(null)
+                    // 重试：重新发送最后一条用户消息
+                    if (currentSession && currentSession.messages.length >= 2) {
+                      const lastUserMsg = [...currentSession.messages].reverse().find(m => m.role === 'user')
+                      if (lastUserMsg) {
+                        // 模拟重新发送
+                        const inputEl = inputRef.current
+                        if (inputEl) {
+                          inputEl.innerText = lastUserMsg.content
+                          // 触发发送
+                          setTimeout(() => {
+                            const sendBtn = inputEl.parentElement?.querySelector('[data-send-btn]') as HTMLButtonElement
+                            sendBtn?.click()
+                          }, 50)
+                        }
+                      }
+                    }
+                  }}
+                  onSkip={() => setErrorRecovery(null)}
+                  onResetContext={() => {
+                    setErrorRecovery(null)
+                    // 清空当前会话消息以重置上下文
+                    if (currentSessionId) {
+                      useAgentStore.getState().clearMessages(currentSessionId)
+                    }
+                  }}
+                />
               </div>
             )}
             <div ref={messagesEndRef} />
@@ -992,6 +1187,25 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         </div>
 
         <div className="flex items-center gap-2">
+          <button onClick={() => setShowChatExport(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="导出对话">
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
+          <button onClick={() => setShowShortcutHelp(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="快捷键">
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="4" width="20" height="16" rx="2" />
+              <line x1="6" y1="8" x2="6" y2="8" />
+              <line x1="10" y1="8" x2="10" y2="8" />
+              <line x1="14" y1="8" x2="14" y2="8" />
+              <line x1="18" y1="8" x2="18" y2="8" />
+              <line x1="6" y1="12" x2="6" y2="12" />
+              <line x1="18" y1="12" x2="18" y2="12" />
+              <line x1="8" y1="16" x2="16" y2="16" />
+            </svg>
+          </button>
           <button onClick={() => currentAgentId && newConversation(currentAgentId)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="新建会话">
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="12" y1="5" x2="12" y2="19"></line>
@@ -1075,6 +1289,17 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             onInput={(e) => {
               setInputText(e.currentTarget.innerText.replace(/\u00a0/g, ' '))
               inputHtmlRef.current = e.currentTarget.innerHTML
+              // CommandMenu 检测
+              const cursorPos = window.getSelection()?.anchorOffset || 0
+              const text = e.currentTarget.innerText.replace(/\u00a0/g, ' ')
+              const cmdMenu = useCommandMenu(text, Math.min(cursorPos, text.length), mentionItems)
+              if (cmdMenu.trigger) {
+                setCmdMenuTrigger(cmdMenu.trigger)
+                setCmdMenuIndex(cmdMenu.triggerIndex)
+                setCmdMenuQuery(cmdMenu.query)
+              } else {
+                setCmdMenuTrigger(null)
+              }
             }}
             onKeyDown={handleKeyDown}
             onFocus={() => setIsFocused(true)}
@@ -1149,6 +1374,64 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           </div>
         </div>
 
+        {/* CommandMenu 弹出 */}
+        {cmdMenuTrigger && (
+          <CommandMenu
+            trigger={cmdMenuTrigger}
+            query={cmdMenuQuery}
+            mentions={mentionItems}
+            onSelect={(item) => {
+              if (cmdMenuTrigger === '/') {
+                // 命令选择：替换输入框内容或执行操作
+                if (item.insertText) {
+                  if (inputRef.current) {
+                    const text = inputRef.current.innerText
+                    const before = text.slice(0, cmdMenuIndex)
+                    const after = text.slice(cmdMenuIndex + cmdMenuQuery.length + 1)
+                    inputRef.current.innerText = before + item.insertText + after
+                    setInputText(inputRef.current.innerText)
+                    // 光标移到末尾
+                    const range = document.createRange()
+                    range.selectNodeContents(inputRef.current)
+                    range.collapse(false)
+                    const sel = window.getSelection()
+                    sel?.removeAllRanges()
+                    sel?.addRange(range)
+                  }
+                } else if (item.id === 'clear') {
+                  if (currentSessionId) useAgentStore.getState().clearMessages(currentSessionId)
+                } else if (item.id === 'reset') {
+                  // TODO: 重置上下文 API 待后端提供
+                  console.log('Reset context - API not yet available')
+                } else if (item.id === 'export') {
+                  // 导出对话
+                  if (currentSession) {
+                    const md = currentSession.messages.map(m => `### ${m.role === 'user' ? '🧑 用户' : '🤖 助手'}\n\n${m.content}`).join('\n---\n')
+                    const blob = new Blob([md], { type: 'text/markdown' })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    a.href = url
+                    a.download = `对话_${new Date().toISOString().slice(0, 10)}.md`
+                    a.click()
+                    URL.revokeObjectURL(url)
+                  }
+                }
+              } else {
+                // @ 提及选择：插入标签
+                if (inputRef.current) {
+                  const text = inputRef.current.innerText
+                  const before = text.slice(0, cmdMenuIndex)
+                  const after = text.slice(cmdMenuIndex + cmdMenuQuery.length + 1)
+                  inputRef.current.innerText = before + item.insertText + ' ' + after
+                  setInputText(inputRef.current.innerText)
+                }
+              }
+              setCmdMenuTrigger(null)
+            }}
+            onClose={() => setCmdMenuTrigger(null)}
+          />
+        )}
+
         <div className="flex items-center mt-2 text-[11px]" style={{ color: colors.textDim }}>
           <div className="relative" style={{ zIndex: 10 }}>
             <select value={currentAgentId || ''} onChange={(e) => setCurrentAgentId(e.target.value)} className="flex items-center gap-1.5 px-2 py-1 rounded-md cursor-pointer transition-colors appearance-none pr-6" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, fontSize: '11px', border: 'none' }}>
@@ -1198,6 +1481,15 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           </div>
         </div>
       </div>
+      {/* P2: 快捷键面板 */}
+      <ShortcutHelp open={showShortcutHelp} onClose={() => setShowShortcutHelp(false)} />
+      {/* P2: 导出面板 */}
+      <ChatExport
+        open={showChatExport}
+        onClose={() => setShowChatExport(false)}
+        messages={currentSession?.messages || []}
+        sessionTitle={currentSession?.name}
+      />
     </div>
   )
 }

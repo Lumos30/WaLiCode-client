@@ -2,6 +2,7 @@
  * 智能体 API
  */
 import { get, post, getBaseUrl } from './request'
+import { toolProgressStore } from '../components/ToolProgressBar'
 
 export interface AiAgentConfigDTO {
   agentId: string
@@ -42,7 +43,24 @@ export interface ChatRequestDTO {
 
 /** 后端 ReAct 事件（ReActEventDTO） */
 export interface ReActEvent {
-  event: 'text' | 'tool_call' | 'tool_result' | 'round_end' | 'done' | 'error' | 'heartbeat' | 'tool_progress' | 'task_breakdown' | 'task_progress' | 'sub_agent_call' | 'sub_agent_result'
+  event:
+    | 'text'
+    | 'tool_call'
+    | 'tool_result'
+    | 'round_end'
+    | 'done'
+    | 'error'
+    | 'warning'
+    | 'heartbeat'
+    | 'tool_progress'
+    | 'task_breakdown'
+    | 'task_progress'
+    | 'sub_agent_call'
+    | 'sub_agent_result'
+    | 'permission_confirm'
+    | 'tool_output'
+    | 'round_start'
+    | 'status'
   content?: string
   toolCallId?: string
   toolName?: string
@@ -67,6 +85,23 @@ export interface ReActEvent {
   }
   subAgent?: SubAgentInfo
   changeSummary?: ChangeSummary
+  // ── 新增事件字段 ──
+  /** 权限确认信息 (event=permission_confirm) */
+  permission?: PermissionConfirmData
+  /** 工具实时输出片段 (event=tool_output) */
+  outputChunk?: string
+  /** 状态更新消息 (event=status) */
+  statusMessage?: string
+}
+
+/** 权限确认事件数据 */
+export interface PermissionConfirmData {
+  confirmId: string
+  toolName: string
+  toolArgs: string
+  riskLevel: 'DENY' | 'CONFIRM' | 'ALLOW'
+  reason: string
+  timeoutMs: number
 }
 
 /** 子代理调用信息 */
@@ -176,6 +211,14 @@ export function reactChatStream(
   onSubAgent?: (info: SubAgentInfo) => void,
   onChangeSummary?: (summary: ChangeSummary) => void,
   projectContext?: ProjectContextDTO | null,
+  // ── 新增回调 ──
+  onPermissionConfirm?: (data: PermissionConfirmData) => void,
+  onToolOutput?: (toolCallId: string, outputChunk: string) => void,
+  onStatus?: (message: string) => void,
+  onWarning?: (message: string) => void,
+  onRoundStart?: (roundIndex: number) => void,
+  onReconnect?: (attempt: number, maxAttempts: number) => void,
+  onHeartbeat?: () => void,
 ): () => void {
   const baseUrl = getBaseUrl()
   const url = `${baseUrl}/api/v1/chat_stream`
@@ -193,6 +236,12 @@ export function reactChatStream(
   let retryCount = 0
   const MAX_RETRIES = 2
   const RETRY_DELAY = 1000
+  // 流中途断开重连参数
+  let streamReconnectCount = 0
+  const MAX_STREAM_RECONNECTS = 3
+  const STREAM_RECONNECT_DELAY = 2000
+  let isStreamStarted = false // 是否已开始接收流数据
+  let isAborted = false // 用户主动取消
 
   function doFetch() {
     fetch(url, {
@@ -224,11 +273,14 @@ export function reactChatStream(
       function read() {
         reader.read().then(({ done, value }) => {
           if (done) {
-            console.log('[SSE stream done], lastFullText=', lastFullText)
+            // SSE stream ended normally
             onDone(lastFullText)
             return
           }
           buffer += decoder.decode(value, { stream: true })
+
+          // 标记流已开始
+          isStreamStarted = true
 
           // 按换行分割，解析 JSON 事件（后端直接发 JSON 行，无 data: 前缀）
           const lines = buffer.split('\n')
@@ -238,15 +290,17 @@ export function reactChatStream(
             const trimmed = line.trim()
             if (!trimmed) continue
 
-            console.log('[SSE recv]', trimmed.substring(0, 200))
+            // SSE message received
 
             try {
               const event: ReActEvent = JSON.parse(trimmed)
               // 忽略心跳保活事件
               if (event.event === 'heartbeat') {
-                console.log('[SSE heartbeat]')
+                // SSE heartbeat received
+                onHeartbeat?.()
                 continue
               }
+              isStreamStarted = true
               processEvent(event)
             } catch {
               // 非 JSON 行，忽略（可能是 HTTP chunk 边界）
@@ -254,15 +308,24 @@ export function reactChatStream(
           }
           read()
         }).catch((err) => {
-          if (err.name !== 'AbortError') {
-            // 如果已有累积内容，说明是流中途断开（可能是后端处理完但连接关闭）
-// 不显示错误，直接用已有内容触发 onDone
-            if (lastFullText) {
-              console.warn('[SSE stream ended with partial content]', err.message)
-              onDone(lastFullText)
-            } else {
-              onError(err.message)
-            }
+          if (err.name === 'AbortError' || isAborted) {
+            // 用户主动取消，不重连
+            return
+          }
+          // 流中途断开（网络错误/服务器关闭）
+          if (isStreamStarted && streamReconnectCount < MAX_STREAM_RECONNECTS) {
+            streamReconnectCount++
+            console.warn(`[SSE] stream interrupted, reconnecting ${streamReconnectCount}/${MAX_STREAM_RECONNECTS}...`, err.message)
+            onReconnect?.(streamReconnectCount, MAX_STREAM_RECONNECTS)
+            setTimeout(() => {
+              if (!isAborted) doFetch()
+            }, STREAM_RECONNECT_DELAY * streamReconnectCount)
+          } else if (lastFullText) {
+            // 已达重连上限，但有累积内容 → 交付已有内容
+            console.warn('[SSE] reconnect exhausted, delivering partial content')
+            onDone(lastFullText)
+          } else {
+            onError(err.message)
           }
         })
       }
@@ -273,7 +336,7 @@ export function reactChatStream(
             // 文本流 → 更新累积文本
             const fullText = event.fullText || event.content || ''
             lastFullText = fullText
-            console.log('[SSE text]', fullText.substring(0, 100))
+            // SSE text chunk received
             onText(fullText)
             break
           }
@@ -337,6 +400,12 @@ export function reactChatStream(
               if (event.args) toolProgressArgsMap.set(tn, event.args)
               // 工具开始执行
               stepCounter++
+              // 更新 ToolProgressBar store
+              toolProgressStore.set({
+                toolCallId: `${tn}-${stepCounter}`,
+                toolName: tn,
+                status: 'running',
+              })
               onStep({
                 stepType: 'tool_call',
                 stepIndex: stepCounter,
@@ -349,6 +418,13 @@ export function reactChatStream(
               // 工具执行完成（success/error）→ 补回 args 作为 toolParams
               const tn = event.toolName || 'unknown'
               const savedArgs = toolProgressArgsMap.get(tn) || ''
+              // 更新 ToolProgressBar store
+              toolProgressStore.update(`${tn}-${stepCounter}`, {
+                status: event.status === 'success' ? 'success' : 'failure',
+                detail: event.summary,
+              })
+              // 延迟移除进度条
+              setTimeout(() => toolProgressStore.remove(`${tn}-${stepCounter}`), 2000)
               onStep({
                 stepType: 'tool_call',
                 stepIndex: stepCounter,
@@ -382,25 +458,23 @@ export function reactChatStream(
             if (event.content) {
               try {
                 const result = JSON.parse(event.content)
-                finalContent = result.assistantContent || result.content || event.content
-              } catch {
-                finalContent = event.content
+                finalContent = result.assistantContent || result.content || ''
+              } catch (e) {
+                console.warn('[SSE done] Failed to parse result JSON:', e)
+                finalContent = ''
               }
             }
-            console.log('[SSE done] finalContent=', finalContent.substring(0, 200))
+            // 如果解析失败或 content 为空，回退到 lastFullText
+            if (!finalContent && lastFullText) {
+              finalContent = lastFullText
+            }
+            // SSE done event received
             // result 步骤始终携带最终 content，用于渲染
             const resultStep: ReActStep = {
               stepType: 'result',
               stepIndex: ++stepCounter,
               status: 'success',
-            }
-            if (finalContent) {
-              resultStep.content = finalContent
-              // 如果之前没有收到 text 事件（如纯工具调用场景），补充更新
-              if (!lastFullText) {
-                lastFullText = finalContent
-                onText(finalContent)
-              }
+              content: finalContent || '',  // 始终设置 content，避免 undefined
             }
             onStep(resultStep)
             // 传递文件变更摘要
@@ -418,6 +492,44 @@ export function reactChatStream(
               error: event.content || '未知错误',
               status: 'failure',
             })
+            break
+          }
+
+          case 'warning': {
+            // 警告（非致命）
+            onWarning?.(event.content || '')
+            break
+          }
+
+          case 'permission_confirm': {
+            // 权限确认请求 → 推入 permissionStore
+            if (event.permission && onPermissionConfirm) {
+              onPermissionConfirm(event.permission)
+            }
+            break
+          }
+
+          case 'tool_output': {
+            // 工具实时输出片段
+            if (event.toolCallId && event.outputChunk) {
+              onToolOutput?.(event.toolCallId, event.outputChunk)
+            }
+            break
+          }
+
+          case 'status': {
+            // 状态更新（上下文压缩/降级/重连等）
+            if (event.statusMessage) {
+              onStatus?.(event.statusMessage)
+            }
+            break
+          }
+
+          case 'round_start': {
+            // 新轮次开始
+            if (event.content) {
+              onRoundStart?.(parseInt(event.content, 10) || 1)
+            }
             break
           }
 
@@ -490,7 +602,10 @@ export function reactChatStream(
 
   doFetch()
 
-  return () => controller.abort()
+  return () => {
+    isAborted = true
+    controller.abort()
+  }
 }
 
 /**
