@@ -249,6 +249,31 @@ function MarkdownContent({ content, colors, isUser }: { content: string; colors:
         img: ({ src, alt }: { src?: string; alt?: string }) => {
           // 只渲染 data:image URL 和 http(s) 图片，过滤掉超长的纯文本误匹配
           if (!src || src.length < 100) return null
+          // 用户消息中：紧凑缩略图卡片样式
+          if (isUser) {
+            return (
+              <div
+                className="inline-flex items-center gap-2.5 px-3 py-2 rounded-lg my-1.5 max-w-[240px] cursor-pointer transition-colors hover:opacity-80"
+                style={{
+                  backgroundColor: 'rgba(255,255,255,0.08)',
+                  border: `1px solid ${colors.border}50`,
+                }}
+                onClick={() => window.open(src, '_blank')}
+                title="点击放大"
+              >
+                <img
+                  src={src}
+                  alt={alt || '上传的图片'}
+                  className="w-10 h-10 rounded-md object-cover flex-shrink-0"
+                  style={{ border: `1px solid ${colors.border}30` }}
+                />
+                <span className="text-[11px] truncate" style={{ color: colors.textSecondary }}>
+                  📎 {alt || '图片'}
+                </span>
+              </div>
+            )
+          }
+          // AI 消息中：正常大图预览
           return (
             <img
               src={src}
@@ -1079,7 +1104,8 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
   return (
     <div className={`group/msg relative px-4 py-1.5 ${isUser ? 'flex justify-end' : 'flex justify-start'} overflow-hidden`}>
       <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[88%] min-w-0`}>
-        {/* 浮动操作菜单 */}
+        {/* 浮动操作菜单 — 仅 AI 消息显示，用户消息不需要 */}
+        {!isUser && (
         <div className={`absolute top-1 ${isUser ? 'left-2' : 'right-2'} z-10`}>
           <MessageActionMenu
             isUser={isUser}
@@ -1091,6 +1117,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isLoading, o
             onToggleBookmark={() => setIsBookmarked(!isBookmarked)}
           />
         </div>
+        )}
         <div
           className="w-full px-3.5 py-2.5 text-[13px] leading-relaxed overflow-hidden"
           style={{

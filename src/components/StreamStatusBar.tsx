@@ -21,12 +21,7 @@ import { chatConfig } from '../config/chat'
 
 const STATUS_CONFIG: Record<StreamStatus, { color: string; bg: string; icon: string; text: (n: number, err: string | null) => string } | null> = {
   idle: null,
-  connecting: {
-    color: '#60a5fa',
-    bg: 'rgba(59, 130, 246, 0.1)',
-    icon: '🔗',
-    text: () => '正在连接...',
-  },
+  connecting: null, // 连接中属于正常状态，不显示横幅打扰用户
   streaming: null, // 正常流式输出时不显示
   reconnecting: {
     color: '#fbbf24',

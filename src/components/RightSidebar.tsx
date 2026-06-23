@@ -39,18 +39,8 @@ interface RightSidebarProps {
   activeTerminalSessionId?: string | null
 }
 
-function escapeHtml(text: string) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
 /**
  * 清理粘贴文本中的 Markdown 格式符号，转为纯文本
- * 解决从 AI 回复中复制内容粘贴到输入框时，显示 **、##、1. 等原始标记的问题
  */
 function stripMarkdownForPaste(text: string): string {
   if (!text) return text
@@ -79,17 +69,6 @@ function stripMarkdownForPaste(text: string): string {
     .replace(/^[-*_]{3,}\s*$/gm, '')
     // 代码块标记: ``` → 移除
     .replace(/^```\w*$/gm, '')
-}
-
-function buildContextSpanHtml(tag: { id: string; label: string; type: string; fullContent: string }) {
-  const icon = tag.type === 'file' ? '📄' : tag.type === 'terminal-selection' ? '🖥️' : '📎'
-  // 使用高对比度配色：深色边框 + 半透明白底 + 深色文字
-  // 无论在深色/浅色/蓝色气泡背景下都清晰可读
-  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 mx-1 rounded-md border text-[12px] align-middle select-none context-tag" data-context="${escapeHtml(encodeURIComponent(JSON.stringify(tag)))}" contenteditable="false" style="background:rgba(255,255,255,0.88);border-color:rgba(59,130,246,0.5);color:#1e3a5f;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;box-shadow:0 1px 2px rgba(0,0,0,0.1);">
-    <span>${icon}</span>
-    <span style="max-width:160px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(tag.label)}</span>
-    <span contenteditable="false" data-remove-context="true" class="ml-0.5 opacity-60 hover:opacity-100 cursor-pointer">✕</span>
-  </span>&nbsp;`
 }
 
 export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSidebarProps) {
@@ -191,10 +170,15 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     return () => clearInterval(interval)
   }, [])
 
-  // --- 输入历史导航 ---
-  const historyRef = useRef<string[]>([])
+  // --- 输入历史导航（支持文本 + 标签恢复） ---
+  interface HistoryEntry {
+    text: string
+    tags: Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'custom' }>
+  }
+  const historyRef = useRef<HistoryEntry[]>([])
   const historyIndexRef = useRef<number>(-1) // -1 = 当前输入
   const savedInputRef = useRef<string>('') // 导航前的当前输入
+  const savedInputTagsRef = useRef<Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'custom' }>>([]) // 导航前的当前标签
 
   // 从 localStorage 加载历史
   useEffect(() => {
@@ -205,7 +189,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   }, [])
 
   // 保存历史到 localStorage
-  const saveHistory = (history: string[]) => {
+  const saveHistory = (history: HistoryEntry[]) => {
     try {
       // 最多保留 200 条
       const trimmed = history.slice(-200)
@@ -215,12 +199,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   }
 
   // 添加一条历史记录（发送时调用）
-  const pushHistory = (text: string) => {
-    if (!text.trim()) return
+  const pushHistory = (text: string, tags: Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'custom' }>) => {
+    if (!text.trim() && tags.length === 0) return
     const history = [...historyRef.current]
-    // 避免连续重复
-    if (history[history.length - 1] !== text) {
-      history.push(text)
+    // 避免连续重复（比较文本+标签数量）
+    const last = history[history.length - 1]
+    if (last?.text !== text || last?.tags.length !== tags.length) {
+      history.push({ text, tags })
       saveHistory(history)
     }
     historyIndexRef.current = -1
@@ -233,13 +218,19 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     if (historyIndexRef.current === -1) {
       // 从当前输入开始导航
       savedInputRef.current = inputRef.current?.innerText || ''
+      savedInputTagsRef.current = inputTags.map(t => ({ label: t.label, fullContent: t.fullContent, type: t.type }))
       historyIndexRef.current = history.length - 1
     } else if (historyIndexRef.current > 0) {
       historyIndexRef.current--
     }
-    const text = history[historyIndexRef.current]
+    const entry = history[historyIndexRef.current]
     if (inputRef.current) {
-      inputRef.current.innerText = text
+      inputRef.current.innerText = entry.text
+      // 恢复标签
+      clearInputTags()
+      for (const tag of entry.tags) {
+        addInputTag(tag)
+      }
       // 光标移到最后
       const range = document.createRange()
       range.selectNodeContents(inputRef.current)
@@ -256,12 +247,22 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     if (historyIndexRef.current === -1) return // 已经在当前输入
     if (historyIndexRef.current < history.length - 1) {
       historyIndexRef.current++
-      const text = history[historyIndexRef.current]
-      if (inputRef.current) inputRef.current.innerText = text
+      const entry = history[historyIndexRef.current]
+      if (inputRef.current) inputRef.current.innerText = entry.text
+      // 恢复标签
+      clearInputTags()
+      for (const tag of entry.tags) {
+        addInputTag(tag)
+      }
     } else {
       // 回到当前输入
       historyIndexRef.current = -1
       if (inputRef.current) inputRef.current.innerText = savedInputRef.current
+      // 恢复之前保存的标签
+      clearInputTags()
+      for (const tag of savedInputTagsRef.current) {
+        addInputTag(tag)
+      }
     }
     // 光标移到最后
     if (inputRef.current) {
@@ -429,35 +430,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   const insertTagAtCursor = (tag: { id: string; label: string; type: 'terminal-selection' | 'file' | 'custom'; fullContent: string }) => {
     if (!inputRef.current) return
-    // 同步写入 Zustand store（handleSend 依赖 inputTags 提取 inlineDatas 等数据）
+    // 仅写入 Zustand store（store 渲染层负责显示标签，避免 DOM 插入导致重复）
     addInputTag(tag)
-    const selection = window.getSelection()
-    const range = lastRangeRef.current && inputRef.current.contains(lastRangeRef.current.commonAncestorContainer)
-      ? lastRangeRef.current
-      : selection && selection.rangeCount > 0 && inputRef.current.contains(selection.anchorNode)
-        ? selection.getRangeAt(0)
-        : null
-
-    const wrapper = document.createElement('span')
-    wrapper.innerHTML = buildContextSpanHtml(tag)
-    const node = wrapper.firstChild as Node
-
-    if (range) {
-      range.deleteContents()
-      range.insertNode(node)
-      const space = document.createTextNode('\u00A0')
-      node.parentNode?.insertBefore(space, node.nextSibling)
-      range.setStartAfter(space)
-      range.setEndAfter(space)
-      selection?.removeAllRanges()
-      selection?.addRange(range)
-      lastRangeRef.current = range.cloneRange()
-    } else {
-      inputRef.current.appendChild(node)
-      inputRef.current.appendChild(document.createTextNode('\u00A0'))
-    }
     inputRef.current.focus()
-    syncInputTextFromDom()
   }
 
   const handleAddCurrentFile = () => {
@@ -546,8 +521,10 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     const plainText = inputRef.current.innerText.replace(/\u00a0/g, ' ').trim()
     if ((!plainText && inputTags.length === 0) || isLoading) return
 
-    // 保存到输入历史
-    if (plainText) pushHistory(plainText)
+    // 保存到输入历史（文本 + 标签）
+    if (plainText || inputTags.length > 0) {
+      pushHistory(plainText, inputTags.map(t => ({ label: t.label, fullContent: t.fullContent, type: t.type })))
+    }
 
     if (!currentSessionId) {
       await createServerSession(currentAgentId)
