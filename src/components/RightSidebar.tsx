@@ -846,10 +846,25 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         abortRef.current = null
         setLoading(false)
         useStreamStore.getState().setError(err)
-        // 设置错误恢复卡片
+        // 设置错误恢复卡片 — 根据错误信息智能分类
+        let errorType: ErrorRecovery['type'] = 'unknown'
+        let errorTitle = '对话已中断'
+        if (err.includes('network') || err.includes('Failed to fetch') || err.includes('fetch') || err.includes('NetworkError') || err.includes('Failed')) {
+          errorType = 'network'
+          errorTitle = '网络连接异常'
+        } else if (err.includes('413') || err.includes('too large') || err.includes('payload')) {
+          errorType = 'context_limit'
+          errorTitle = '请求体过大'
+        } else if (err.includes('timeout') || err.includes('超时')) {
+          errorType = 'network'
+          errorTitle = '连接超时'
+        } else if (err.includes('500') || err.includes('502') || err.includes('503') || err.includes('504')) {
+          errorType = 'network'
+          errorTitle = '服务暂时不可用'
+        }
         setErrorRecovery({
-          type: err.includes('network') || err.includes('Failed') || err.includes('fetch') ? 'network' : 'unknown',
-          title: err.includes('413') ? '请求体过大' : '请求失败',
+          type: errorType,
+          title: errorTitle,
           message: err,
         })
       },
@@ -1151,21 +1166,21 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   canRetry={true}
                   onRetry={() => {
                     setErrorRecovery(null)
-                    // 重试：重新发送最后一条用户消息
+                    // 重试：重新发送最后一条用户消息（含标签）
                     if (currentSession && currentSession.messages.length >= 2) {
                       const lastUserMsg = [...currentSession.messages].reverse().find(m => m.role === 'user')
                       if (lastUserMsg) {
-                        // 模拟重新发送
+                        // 恢复文本到输入框
                         const inputEl = inputRef.current
                         if (inputEl) {
-                          inputEl.innerText = lastUserMsg.content
-                          // 触发发送
-                          setTimeout(() => {
-                            const sendBtn = inputEl.parentElement?.querySelector('[data-send-btn]') as HTMLButtonElement
-                            sendBtn?.click()
-                          }, 50)
+                          inputEl.innerText = lastUserMsg.content || ''
                         }
+                        // 延迟触发发送，让 DOM 更新完成
+                        setTimeout(() => handleSend(), 100)
                       }
+                    } else if (inputRef.current) {
+                      // 没有历史消息时，直接重新发送当前输入框内容
+                        setTimeout(() => handleSend(), 100)
                     }
                   }}
                   onSkip={() => setErrorRecovery(null)}

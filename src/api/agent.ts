@@ -249,6 +249,7 @@ export function reactChatStream(
   let streamReconnectCount = 0
   let isStreamStarted = false // 是否已开始接收流数据
   let isAborted = false // 用户主动取消
+  let doneCalled = false // 防止 onDone 重复调用
   // 单次请求超时定时器
   let requestTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -301,7 +302,10 @@ export function reactChatStream(
         reader.read().then(({ done, value }) => {
           if (done) {
             // SSE stream ended normally
-            onDone(lastFullText)
+            if (!doneCalled) {
+              doneCalled = true
+              onDone(lastFullText)
+            }
             return
           }
           buffer += decoder.decode(value, { stream: true })
@@ -350,7 +354,10 @@ export function reactChatStream(
           } else if (lastFullText) {
             // 已达重连上限，但有累积内容 → 交付已有内容
             console.warn('[SSE] reconnect exhausted, delivering partial content')
-            onDone(lastFullText)
+            if (!doneCalled) {
+              doneCalled = true
+              onDone(lastFullText)
+            }
           } else {
             onError(err.message)
           }
@@ -507,6 +514,13 @@ export function reactChatStream(
             // 传递文件变更摘要
             if (event.changeSummary) {
               onChangeSummary?.(event.changeSummary)
+            }
+            // 触发 onDone 回调，确保 loading 状态被清除
+            // 后端可能不关闭 SSE 连接（缺少 emitter.complete()），
+            // 所以不能依赖 reader.read() done 信号来触发 onDone
+            if (!doneCalled) {
+              doneCalled = true
+              onDone(finalContent)
             }
             break
           }
