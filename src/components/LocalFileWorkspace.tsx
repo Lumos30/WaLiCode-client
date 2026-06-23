@@ -191,24 +191,6 @@ export function LocalFileWorkspace() {
               发送至 AI
             </button>
           )}
-          <button
-            onClick={handleSave}
-            disabled={!activeTab.modified}
-            className="flex items-center gap-1 px-3 py-1 rounded text-xs transition-colors"
-            style={{
-              backgroundColor: activeTab.modified ? colors.accent : 'transparent',
-              color: activeTab.modified ? '#fff' : colors.textDim,
-              cursor: activeTab.modified ? 'pointer' : 'not-allowed',
-              border: `1px solid ${activeTab.modified ? colors.accent : colors.border}`,
-            }}
-          >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M19 21H5a2 2 0 01-2-2V7a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"></path>
-              <polyline points="17 21 17 13 7 13 7 21"></polyline>
-              <polyline points="7 3 7 8 15 8"></polyline>
-            </svg>
-            保存
-          </button>
         </div>
       </div>
 
