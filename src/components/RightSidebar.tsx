@@ -122,6 +122,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     activeBinding,
     bindTerminal,
     inputTags,
+    addInputTag,
     removeInputTag,
     getInputTagsContent,
     clearInputTags,
@@ -426,10 +427,10 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     createServerSession,
   ])
 
-  const insertTagAtCursor = (tag: { id: string; label: string; type: string; fullContent: string }) => {
+  const insertTagAtCursor = (tag: { id: string; label: string; type: 'terminal-selection' | 'file' | 'custom'; fullContent: string }) => {
     if (!inputRef.current) return
-    const span = document.createElement('span')
-    span.innerHTML = buildContextSpanHtml(tag)
+    // 同步写入 Zustand store（handleSend 依赖 inputTags 提取 inlineDatas 等数据）
+    addInputTag(tag)
     const selection = window.getSelection()
     const range = lastRangeRef.current && inputRef.current.contains(lastRangeRef.current.commonAncestorContainer)
       ? lastRangeRef.current
@@ -1371,6 +1372,29 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
             }}
             onPaste={(e) => {
               e.preventDefault()
+              // 优先检查剪贴板中的图片数据
+              const imageItems = Array.from(e.clipboardData.items).filter(
+                (item) => item.type.startsWith('image/')
+              )
+              if (imageItems.length > 0) {
+                const imageFile = imageItems[0].getAsFile()
+                if (imageFile) {
+                  const reader = new FileReader()
+                  reader.onload = (ev) => {
+                    const dataUrl = ev.target?.result as string
+                    if (!dataUrl) return
+                    insertTagAtCursor({
+                      id: `img_${Date.now()}`,
+                      label: `图片: ${imageFile.name || '粘贴图片'}`,
+                      fullContent: `[图片: ${imageFile.name || '粘贴图片'}]\n${dataUrl}`,
+                      type: 'custom',
+                    })
+                  }
+                  reader.readAsDataURL(imageFile)
+                  return
+                }
+              }
+              // 无图片时，走纯文本粘贴流程
               const rawText = e.clipboardData.getData('text/plain')
               const cleanText = stripMarkdownForPaste(rawText)
               document.execCommand('insertText', false, cleanText)
