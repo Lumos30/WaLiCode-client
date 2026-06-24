@@ -13,7 +13,16 @@ export interface SSHConnection {
   updatedAt: number
 }
 
-import type { ReActStep } from '../api/agent'
+import type { ReActStep, ChangeSummary, TaskBreakdownDTO } from '../api/agent'
+
+/** 消息子类型（多消息流架构） */
+export type AgentMessageType =
+  | 'text'         // AI 文本回复（Markdown）
+  | 'tool_call'    // 工具调用（可折叠卡片）
+  | 'tool_result'  // 工具执行结果
+  | 'thinking'     // 思考/进度提示
+  | 'summary'      // 最终汇总（含 changeSummary）
+  | 'error'        // 错误消息
 
 // Agent 会话消息
 export interface AgentMessage {
@@ -21,12 +30,32 @@ export interface AgentMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: number
-  /** ReAct 步骤列表（React 模式下有值） */
+
+  // ── 多消息流字段 ──
+  /** 消息子类型 */
+  messageType: AgentMessageType
+  /** 同一次对话回合的分组 ID（用户消息 + AI 多条回复共享同一 groupId） */
+  groupId: string
+
+  // ── 工具相关（messageType=tool_call/tool_result 时有值） ──
+  /** 工具名称 */
+  toolName?: string
+  /** 工具调用 ID（关联 tool_call 和 tool_result） */
+  toolCallId?: string
+  /** 工具参数 */
+  toolParams?: string
+  /** 工具执行结果 */
+  toolResult?: string
+  /** 工具执行状态 */
+  status?: 'in_progress' | 'success' | 'failure'
+
+  // ── 兼容旧字段（逐步废弃） ──
+  /** @deprecated 多消息流模式下不再使用 */
   steps?: ReActStep[]
-  /** 任务拆解方案（task_breakdown 事件触发时设置） */
-  taskBreakdown?: import('../api/agent').TaskBreakdownDTO
+  /** 任务拆解方案 */
+  taskBreakdown?: TaskBreakdownDTO
   /** 文件变更摘要（done 事件中携带） */
-  changeSummary?: import('../api/agent').ChangeSummary
+  changeSummary?: ChangeSummary
 }
 
 // Agent 会话

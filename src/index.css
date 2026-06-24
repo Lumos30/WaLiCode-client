@@ -88,6 +88,39 @@ body {
   50% { opacity: 1; transform: scale(1); }
 }
 
+/* 跳动圆点动画（三个点依次跳动） */
+@keyframes bounce-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* 思考条呼吸脉冲动画 */
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* 思考中小猫来回跑动画 */
+@keyframes cat-run {
+  0% { left: 0; transform: scaleX(1); }
+  45% { left: calc(100% - 14px); transform: scaleX(1); }
+  50% { left: calc(100% - 14px); transform: scaleX(-1); }
+  95% { left: 0; transform: scaleX(-1); }
+  100% { left: 0; transform: scaleX(1); }
+}
+
+/* 脚印跟随动画（相位偏移） */
+@keyframes pawprints {
+  0% { left: 4px; opacity: 0; }
+  10% { opacity: 0.5; }
+  45% { left: calc(100% - 18px); opacity: 0.5; }
+  50% { left: calc(100% - 18px); opacity: 0; }
+  55% { left: calc(100% - 22px); opacity: 0; }
+  60% { opacity: 0.5; }
+  95% { left: 2px; opacity: 0.5; }
+  100% { left: 2px; opacity: 0; }
+}
+
 /* 工具调用进度条脉冲动画 */
 @keyframes progress-pulse {
   0%, 100% { opacity: 1; }

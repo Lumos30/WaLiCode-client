@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import type { AgentMessage } from '../types'
 import * as agentApi from '../api/agent'
-import type { AiAgentConfigDTO, ReActStep } from '../api/agent'
+import type { AiAgentConfigDTO, ReActStep, ChangeSummary } from '../api/agent'
 import { toolProgressStore } from '../components/ToolProgressBar'
 
 interface AgentStore {
@@ -40,6 +40,26 @@ interface AgentStore {
   updateSubTaskStatus: (sessionId: string, messageId: string, subTaskIndex: number, status: string, result?: string) => void
   // 更新文件变更摘要
   updateMessageChangeSummary: (sessionId: string, messageId: string, summary: import('../api/agent').ChangeSummary) => void
+  // ── 多消息流管理 ──
+  // 添加工具调用消息
+  addToolCallMessage: (sessionId: string, groupId: string, toolCallId: string, toolName: string, toolParams: string) => string
+  // 更新工具消息状态（tool_result 返回时）
+  updateToolMessageStatus: (sessionId: string, messageId: string, status: 'in_progress' | 'success' | 'failure', toolResult?: string) => void
+  // 添加/更新 AI 文本消息（同一 groupId 只有一条 messageType=text 的消息，onText 时更新）
+  upsertTextMessage: (sessionId: string, groupId: string, content: string) => string
+  // 添加汇总消息
+  addSummaryMessage: (sessionId: string, groupId: string, changeSummary?: ChangeSummary) => void
+  // 添加思考消息
+  addThinkingMessage: (sessionId: string, groupId: string, content: string) => string
+  // 替换同组最后一条 thinking 消息的内容（用于更新占位消息）
+  replaceLastThinkingMessage: (sessionId: string, groupId: string, content: string) => void
+  // 移除同组所有 thinking 消息（收到 text 时清理占位）
+  removeThinkingMessages: (sessionId: string, groupId: string) => void
+  // 添加错误消息
+  addErrorMessage: (sessionId: string, groupId: string, content: string) => void
+  // 停止时将同组所有 in_progress 工具消息标记为 failure
+  markGroupInProgressAsFailure: (sessionId: string, groupId: string) => void
+
   // 编辑重发：删除从 messageId 开始的所有消息，将内容填入输入框
   editAndRetry: (sessionId: string, messageId: string) => void
   // 设置输入框内容
@@ -131,6 +151,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           m.id === messageId ? { ...m, steps: [...steps] } : m
         )
         sessions.set(sessionId, { ...session, messages })
+      } else {
+        console.warn('[updateMessageSteps] session not found: sessionId=', sessionId)
       }
       return { sessions }
     }),
@@ -183,6 +205,201 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }),
 
   setInputText: (text) => set({ inputText: text }),
+
+  // ══════════════════════════════════════════════════════════
+  //  多消息流实现
+  // ══════════════════════════════════════════════════════════
+
+  addToolCallMessage: (sessionId, groupId, toolCallId, toolName, toolParams) => {
+    // 使用自增计数器避免 key 重复（Date.now() 在同一毫秒内可能重复）
+    const _tcSeq = ((globalThis as any).__toolCallSeq = ((globalThis as any).__toolCallSeq || 0) + 1)
+    const msgId = `tool_${toolCallId}_${Date.now()}_${_tcSeq}`
+    const msg: AgentMessage = {
+      id: msgId,
+      role: 'assistant',
+      content: toolParams ? `调用 ${toolName}: ${toolParams}` : `调用 ${toolName}`,
+      timestamp: Date.now(),
+      messageType: 'tool_call',
+      groupId,
+      toolName,
+      toolCallId,
+      toolParams,
+      status: 'in_progress',
+    }
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        sessions.set(sessionId, { ...session, messages: [...session.messages, msg] })
+      }
+      return { sessions }
+    })
+    return msgId
+  },
+
+  updateToolMessageStatus: (sessionId, messageId, status, toolResult) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        const messages = session.messages.map((m) =>
+          m.id === messageId
+            ? { ...m, status, toolResult: toolResult ?? m.toolResult, content: toolResult ?? m.content }
+            : m
+        )
+        sessions.set(sessionId, { ...session, messages })
+      }
+      return { sessions }
+    }),
+
+  upsertTextMessage: (sessionId, groupId, content) => {
+    const state = get()
+    const session = state.sessions.get(sessionId)
+    if (!session) return ''
+    // 查找同 groupId 下已有的 assistant text 消息（排除用户消息）
+    const existing = session.messages.find(m => m.groupId === groupId && m.messageType === 'text' && m.role === 'assistant')
+    if (existing) {
+      // 更新
+      set((s) => {
+        const sessions = new Map(s.sessions)
+        const sess = sessions.get(sessionId)
+        if (sess) {
+          const messages = sess.messages.map(m =>
+            m.id === existing.id ? { ...m, content } : m
+          )
+          sessions.set(sessionId, { ...sess, messages })
+        }
+        return { sessions }
+      })
+      return existing.id
+    } else {
+      // 新增
+      const msgId = `text_${Date.now()}`
+      const msg: AgentMessage = {
+        id: msgId,
+        role: 'assistant',
+        content,
+        timestamp: Date.now(),
+        messageType: 'text',
+        groupId,
+      }
+      set((s) => {
+        const sessions = new Map(s.sessions)
+        const sess = sessions.get(sessionId)
+        if (sess) {
+          sessions.set(sessionId, { ...sess, messages: [...sess.messages, msg] })
+        }
+        return { sessions }
+      })
+      return msgId
+    }
+  },
+
+  addSummaryMessage: (sessionId, groupId, changeSummary) => {
+    const msgId = `summary_${Date.now()}`
+    const msg: AgentMessage = {
+      id: msgId,
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now(),
+      messageType: 'summary',
+      groupId,
+      changeSummary,
+    }
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        sessions.set(sessionId, { ...session, messages: [...session.messages, msg] })
+      }
+      return { sessions }
+    })
+  },
+
+  addThinkingMessage: (sessionId, groupId, content) => {
+    const msgId = `think_${Date.now()}`
+    const msg: AgentMessage = {
+      id: msgId,
+      role: 'assistant',
+      content,
+      timestamp: Date.now(),
+      messageType: 'thinking',
+      groupId,
+    }
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        sessions.set(sessionId, { ...session, messages: [...session.messages, msg] })
+      }
+      return { sessions }
+    })
+    return msgId
+  },
+
+  replaceLastThinkingMessage: (sessionId, groupId, content) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (!session) return {}
+      // 找到同组最后一条 thinking 消息并替换内容
+      const messages = [...session.messages]
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].groupId === groupId && messages[i].messageType === 'thinking') {
+          messages[i] = { ...messages[i], content }
+          break
+        }
+      }
+      sessions.set(sessionId, { ...session, messages })
+      return { sessions }
+    }),
+
+  removeThinkingMessages: (sessionId, groupId) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (!session) return {}
+      const messages = session.messages.filter(
+        m => !(m.groupId === groupId && m.messageType === 'thinking')
+      )
+      sessions.set(sessionId, { ...session, messages })
+      return { sessions }
+    }),
+
+  addErrorMessage: (sessionId, groupId, content) => {
+    const msgId = `error_${Date.now()}`
+    const msg: AgentMessage = {
+      id: msgId,
+      role: 'assistant',
+      content,
+      timestamp: Date.now(),
+      messageType: 'error',
+      groupId,
+    }
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        sessions.set(sessionId, { ...session, messages: [...session.messages, msg] })
+      }
+      return { sessions }
+    })
+  },
+
+  markGroupInProgressAsFailure: (sessionId, groupId) =>
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        const messages = session.messages.map((m) =>
+          m.groupId === groupId && m.messageType === 'tool_call' && m.status === 'in_progress'
+            ? { ...m, status: 'failure' as const, content: '用户取消' }
+            : m
+        )
+        sessions.set(sessionId, { ...session, messages })
+      }
+      return { sessions }
+    }),
 
   editAndRetry: (sessionId, messageId) =>
     set((state) => {

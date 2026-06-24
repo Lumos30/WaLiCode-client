@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react'
+import React, { useRef, useEffect, useState, useMemo } from 'react'
 import { useThemeStore } from '../stores/themeStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useConnectionStore } from '../stores/connectionStore'
@@ -8,7 +8,7 @@ import { useLocalFileStore } from '../stores/localFileStore'
 import { useAiPatchStore } from '../stores/aiPatchStore'
 import { useOutputStore } from '../stores/outputStore'
 import { usePermissionStore } from '../stores/permissionStore'
-import { useStreamStore } from '../stores/streamStore'
+import { useStreamStore, type StreamStatus } from '../stores/streamStore'
 import * as agentApi from '../api/agent'
 import type { ReActStep, TaskBreakdownDTO } from '../api/agent'
 import { ConnectionStatus } from '../types'
@@ -18,11 +18,487 @@ import { PermissionConfirmModal } from './PermissionConfirmModal'
 import { StreamStatusBar } from './StreamStatusBar'
 import { ErrorRecoveryCard, type ErrorRecovery } from './ErrorRecoveryCard'
 import { TopicDivider, shouldInsertTopicDivider } from './TopicDivider'
+import { SessionSummaryCard } from './SessionSummaryCard'
+import { ArtifactSummaryPanel } from './ArtifactSummaryPanel'
 import { CommandMenu, useCommandMenu, type MenuItem } from './CommandMenu'
 import { ToolProgressBar, toolProgressStore } from './ToolProgressBar'
 import { ShortcutHelp } from './ShortcutHelp'
+import { MarkdownContent, ThinkingBlock, splitThinkTags } from './MessageBubbleShared'
+import { TypewriterRenderer } from './TypewriterRenderer'
 import { ChatExport } from './ChatExport'
 import { EmptyState } from './EmptyState'
+
+// ===== AiTurnBlock — 同一 groupId 的 AI 回合统一渲染 =====
+function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
+  msgs: AgentMessage[]
+  colors: ReturnType<typeof useThemeStore.getState>['colors']
+  isLoading: boolean
+  streamStatus: StreamStatus
+  onRetry?: () => void
+}) {
+  const thinkingMsgs = msgs.filter(m => m.messageType === 'thinking')
+  const toolCallMsgs = msgs.filter(m => m.messageType === 'tool_call')
+  const textMsgs = msgs.filter(m => m.messageType === 'text')
+  const errorMsgs = msgs.filter(m => m.messageType === 'error')
+  const summaryMsgs = msgs.filter(m => m.messageType === 'summary')
+
+  const toolCount = toolCallMsgs.length
+  const doneCount = toolCallMsgs.filter(m => m.status !== 'in_progress').length
+  const failCount = toolCallMsgs.filter(m => m.status === 'failure').length
+  const allToolDone = doneCount === toolCount
+
+  const [toolsExpanded, setToolsExpanded] = useState(false)
+  const [thinkingExpanded, setThinkingExpanded] = useState(false)
+
+  // ── 工具分类 ──
+  type ToolCategory = 'read' | 'edit' | 'exec' | 'search' | 'other'
+  const categoryMeta: Record<ToolCategory, { icon: string; label: string }> = {
+    read:   { icon: '📄', label: '读取' },
+    edit:   { icon: '✏️', label: '编辑' },
+    exec:   { icon: '💻', label: '执行' },
+    search: { icon: '🔍', label: '搜索' },
+    other:  { icon: '🔧', label: '其他' },
+  }
+  function classifyTool(toolName: string): ToolCategory {
+    const l = toolName.toLowerCase()
+    if (l.includes('read') || l.includes('list') || l.includes('glob') || l.includes('find') || l.includes('cat')) return 'read'
+    if (l.includes('write') || l.includes('edit') || l.includes('create') || l.includes('code') || l.includes('patch') || l.includes('mkdir')) return 'edit'
+    if (l.includes('exec') || l.includes('command') || l.includes('ssh') || l.includes('compile') || l.includes('run') || l.includes('shell') || l.includes('bash')) return 'exec'
+    if (l.includes('search') || l.includes('grep') || l.includes('query') || l.includes('scan')) return 'search'
+    return 'other'
+  }
+  const toolCategories = useMemo(() => {
+    const map = new Map<ToolCategory, AgentMessage[]>()
+    toolCallMsgs.forEach(m => {
+      const cat = classifyTool(m.toolName || '')
+      if (!map.has(cat)) map.set(cat, [])
+      map.get(cat)!.push(m)
+    })
+    return map
+  }, [toolCallMsgs])
+  const categoryOrder: ToolCategory[] = ['read', 'edit', 'exec', 'search', 'other']
+
+  const timestamp = msgs[0]?.timestamp || Date.now()
+  const turnTime = (() => {
+    const d = new Date(timestamp)
+    return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  })()
+
+  function extractToolSummary(toolName: string, toolParams?: string): string {
+    if (!toolParams) return toolName
+    const lower = toolName.toLowerCase()
+    if (lower.includes('exec') || lower.includes('command') || lower.includes('ssh')) {
+      const cmd = toolParams.trim().split('\n')[0]
+      return cmd.length > 60 ? cmd.substring(0, 60) + '...' : cmd
+    }
+    const pathMatch = toolParams.match(/(\/?[\w./-]+\.[\w]+)/)
+    if (pathMatch) return pathMatch[1]
+    return toolParams.length > 50 ? toolParams.substring(0, 50) + '...' : toolParams
+  }
+
+  // ── 是否处于思考占位状态 ──
+  const isPlaceholderThinking = isLoading && thinkingMsgs.length > 0 && thinkingMsgs.every(m => m.content === '思考中...')
+  const isReconnecting = isPlaceholderThinking && streamStatus === 'reconnecting'
+  const isDisconnected = isPlaceholderThinking && (streamStatus === 'disconnected' || streamStatus === 'error')
+
+  // ── 是否有实际思考内容（非占位） ──
+  const hasRealThinking = thinkingMsgs.length > 0 && thinkingMsgs.some(m => m.content !== '思考中...')
+
+  // ── 是否需要显示加载指示器（isLoading 但没有任何内容区块） ──
+  const showLoadingBar = isLoading && !isPlaceholderThinking && !hasRealThinking && toolCount === 0 && textMsgs.length === 0 && errorMsgs.length === 0
+
+  return (
+    <div className="space-y-0">
+      {/* ====== 统一机器人头部行 ====== */}
+      <div className="px-4 py-1.5 flex gap-2.5">
+        <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5" style={{ backgroundColor: colors.accent + '20', border: `1px solid ${colors.accent}30` }}>
+          <span className="text-[12px]">🤖</span>
+        </div>
+        <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-semibold" style={{ color: colors.textSecondary }}>WaLiCode</span>
+            <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
+          </div>
+
+          {/* ── 思考条：占位/重连/断开/实际内容 ── */}
+          {isPlaceholderThinking && isReconnecting && (
+            <div className="flex items-center gap-2 py-0.5">
+              <span className="text-[13px]" style={{ animation: 'spin 1.5s linear infinite', display: 'inline-block' }}>🔄</span>
+              <span className="text-[11px]" style={{ color: '#fbbf24' }}>正在重连...</span>
+            </div>
+          )}
+
+          {isPlaceholderThinking && isDisconnected && (
+            <div className="flex items-center gap-2 py-0.5">
+              <span className="text-[13px]">⚠️</span>
+              <span className="text-[11px]" style={{ color: '#f87171' }}>连接已中断</span>
+              {onRetry && (
+                <button
+                  className="px-2 py-0.5 rounded text-[10px] font-medium transition-all hover:opacity-80"
+                  style={{ backgroundColor: colors.accent, color: '#fff' }}
+                  onClick={onRetry}
+                >继续</button>
+              )}
+            </div>
+          )}
+
+          {isPlaceholderThinking && !isReconnecting && !isDisconnected && (
+            <div
+              className="flex items-center gap-2 px-2.5 py-1 rounded-md"
+              style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12`, animation: 'thinking-pulse 2s ease-in-out infinite' }}
+            >
+              <div className="relative w-12 h-4 overflow-hidden" style={{ flexShrink: 0 }}>
+                <span
+                  className="absolute top-0 text-[13px]"
+                  style={{ animation: 'cat-run 2s infinite ease-in-out', display: 'inline-block' }}
+                >🐱</span>
+                <span
+                  className="absolute bottom-0 text-[5px]"
+                  style={{ color: colors.textDim, animation: 'pawprints 2s infinite ease-in-out', opacity: 0.3 }}
+                >🐾</span>
+              </div>
+              <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
+            </div>
+          )}
+
+          {hasRealThinking && (
+            <div
+              className="rounded-md px-2.5 py-1.5 cursor-pointer select-none transition-colors"
+              style={{ backgroundColor: colors.bgSecondary + '50', border: `1px solid ${colors.border}20` }}
+              onClick={() => setThinkingExpanded(!thinkingExpanded)}
+            >
+              <div className="flex items-center gap-1.5">
+                <svg className={`w-3 h-3 transition-transform ${thinkingExpanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                <span className="text-[11px]" style={{ color: colors.textSecondary }}>💭 思考</span>
+                {!thinkingExpanded && (
+                  <span className="text-[10px] truncate max-w-[280px]" style={{ color: colors.textDim }}>
+                    {thinkingMsgs.filter(m => m.content !== '思考中...').slice(-1)[0]?.content?.substring(0, 60)}
+                  </span>
+                )}
+              </div>
+              {thinkingExpanded && (
+                <div className="mt-1.5 space-y-1">
+                  {thinkingMsgs.filter(m => m.content !== '思考中...').map((m) => (
+                    <div key={m.id} className="text-[11px] leading-relaxed" style={{ color: colors.textSecondary }}>
+                      {m.content}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── 通用加载条：isLoading 但无任何内容区块时显示 ── */}
+          {showLoadingBar && (
+            <div
+              className="flex items-center gap-2 px-2.5 py-1 rounded-md"
+              style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12`, animation: 'thinking-pulse 2s ease-in-out infinite' }}
+            >
+              <div className="relative w-12 h-4 overflow-hidden" style={{ flexShrink: 0 }}>
+                <span
+                  className="absolute top-0 text-[13px]"
+                  style={{ animation: 'cat-run 2s infinite ease-in-out', display: 'inline-block' }}
+                >🐱</span>
+                <span
+                  className="absolute bottom-0 text-[5px]"
+                  style={{ color: colors.textDim, animation: 'pawprints 2s infinite ease-in-out', opacity: 0.3 }}
+                >🐾</span>
+              </div>
+              <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ====== 工具调用块 — 独立图标+时间（不重复 🤖 头） ====== */}
+      {toolCount > 0 && (
+        <div className="px-4 py-1 flex gap-2.5">
+          <div className="w-7 shrink-0" />
+          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1.5">
+            {/* 进度标签行 */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px]" style={{ color: colors.textSecondary }}>🔧 工具</span>
+              <span
+                className="px-2 py-0.5 rounded-full text-[10px] font-medium"
+                style={{
+                  backgroundColor: allToolDone
+                    ? (failCount > 0 ? '#f8717120' : '#4ade8020')
+                    : colors.accent + '15',
+                  color: allToolDone
+                    ? (failCount > 0 ? '#f87171' : '#4ade80')
+                    : colors.accent,
+                  border: `1px solid ${
+                    allToolDone
+                      ? (failCount > 0 ? '#f8717140' : '#4ade8040')
+                      : colors.accent + '30'
+                  }`,
+                }}
+              >
+                {allToolDone
+                  ? (failCount > 0 ? `${failCount} failed · ${doneCount}/${toolCount}` : `✓ ${doneCount}/${toolCount}`)
+                  : `${doneCount}/${toolCount}`
+                }
+              </span>
+            </div>
+
+            {/* 分类卡片列表 */}
+            <div className="space-y-1.5">
+              {categoryOrder.filter(c => toolCategories.has(c)).map(cat => {
+                const catMsgs = toolCategories.get(cat)!
+                const meta = categoryMeta[cat]
+                const catDone = catMsgs.filter(m => m.status !== 'in_progress').length
+                const catFail = catMsgs.filter(m => m.status === 'failure').length
+                const catAllDone = catDone === catMsgs.length
+
+                // 分类专属颜色
+                const catColorMap: Record<ToolCategory, string> = {
+                  read: '#60a5fa',   // 蓝色
+                  edit: '#f59e0b',   // 琥珀色
+                  exec: '#a78bfa',   // 紫色
+                  search: '#34d399', // 翠绿
+                  other: '#94a3b8',  // 灰蓝
+                }
+                const catColor = catColorMap[cat]
+
+                return (
+                  <div
+                    key={cat}
+                    className="rounded-lg overflow-hidden transition-all"
+                    style={{
+                      backgroundColor: catColor + '08',
+                      border: `1px solid ${catColor}25`,
+                    }}
+                  >
+                    {/* 分类标题行 — 始终可见 */}
+                    <div
+                      className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer select-none"
+                      onClick={() => setToolsExpanded(!toolsExpanded)}
+                    >
+                      {/* 分类图标 */}
+                      <span
+                        className="w-5 h-5 rounded flex items-center justify-center text-[12px] shrink-0"
+                        style={{ backgroundColor: catColor + '20' }}
+                      >
+                        {meta.icon}
+                      </span>
+
+                      {/* 分类名称 */}
+                      <span className="text-[11px] font-semibold" style={{ color: catColor }}>{meta.label}</span>
+
+                      {/* 数量标签 */}
+                      <span
+                        className="px-1.5 py-0 rounded text-[9px] font-bold tabular-nums"
+                        style={{ backgroundColor: catColor + '15', color: catColor }}
+                      >
+                        {catMsgs.length}
+                      </span>
+
+                      {/* 进度点 */}
+                      <div className="flex items-center gap-0.5">
+                        {catMsgs.slice(0, 8).map((m, i) => {
+                          const dotColor = m.status === 'success' ? '#4ade80' : m.status === 'failure' ? '#f87171' : catColor
+                          return (
+                            <span
+                              key={i}
+                              className="inline-block rounded-full"
+                              style={{ width: 4, height: 4, backgroundColor: dotColor }}
+                            />
+                          )
+                        })}
+                        {catMsgs.length > 8 && (
+                          <span className="text-[9px]" style={{ color: colors.textDim }}>+{catMsgs.length - 8}</span>
+                        )}
+                      </div>
+
+                      {/* 分类状态标签 */}
+                      <span
+                        className="ml-auto px-1.5 py-0 rounded text-[9px] font-medium"
+                        style={{
+                          backgroundColor: catAllDone
+                            ? (catFail > 0 ? '#f8717115' : '#4ade8015')
+                            : catColor + '15',
+                          color: catAllDone
+                            ? (catFail > 0 ? '#f87171' : '#4ade80')
+                            : catColor,
+                        }}
+                      >
+                        {catAllDone
+                          ? (catFail > 0 ? `${catFail} failed` : '✓')
+                          : `${catDone}/${catMsgs.length}`
+                        }
+                      </span>
+
+                      {/* 展开/收起箭头 */}
+                      <svg
+                        className={`w-3 h-3 shrink-0 transition-transform ${toolsExpanded ? 'rotate-90' : ''}`}
+                        style={{ color: colors.textDim }}
+                        viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                      >
+                        <polyline points="6 9 12 15 18 9" />
+                      </svg>
+                    </div>
+
+                    {/* 展开态：工具条目详情 */}
+                    {toolsExpanded && (
+                      <div className="px-2.5 pb-2 space-y-0.5" style={{ borderTop: `1px solid ${catColor}15` }}>
+                        {catMsgs.map(m => {
+                          const summary = extractToolSummary(m.toolName || '', m.toolParams)
+                          const dotColor = m.status === 'success' ? '#4ade80' : m.status === 'failure' ? '#f87171' : catColor
+                          return (
+                            <div key={m.id} className="flex items-center gap-2 py-1">
+                              <span
+                                className="shrink-0 rounded-full"
+                                style={{ width: 5, height: 5, backgroundColor: dotColor }}
+                              />
+                              <span className="text-[11px] font-mono truncate" style={{ color: colors.text }}>{summary}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====== 错误消息 — 图标+时间（不重复 🤖 头） ====== */}
+      {errorMsgs.length > 0 && (
+        <div className="px-4 py-1 flex gap-2.5">
+          <div className="w-7 shrink-0" />
+          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px]" style={{ color: colors.red }}>⚠️ 错误</span>
+              <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
+            </div>
+            {errorMsgs.map(m => (
+              <div key={m.id} className="px-3 py-2 text-[12px] leading-relaxed rounded-lg" style={{ backgroundColor: `${colors.red}10`, color: colors.red, border: `1px solid ${colors.red}25` }}>
+                {m.content}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ====== AI 文本回复 — 独立机器人头部 ====== */}
+      {textMsgs.length > 0 && (
+        <div className="px-4 py-1.5 flex gap-2.5">
+          <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5" style={{ backgroundColor: colors.accent + '20', border: `1px solid ${colors.accent}30` }}>
+            <span className="text-[12px]">🤖</span>
+          </div>
+          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-semibold" style={{ color: colors.textSecondary }}>WaLiCode</span>
+              <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
+            </div>
+            <div className="text-[13px] leading-relaxed overflow-hidden min-w-0">
+              {textMsgs.map(m => {
+                const contentParts = m.content ? splitThinkTags(m.content) : []
+                return (
+                  <div key={m.id}>
+                    {contentParts.length > 0 ? (
+                      contentParts.map((part, idx) => {
+                        if (part.type === 'think') return <ThinkingBlock key={idx} content={part.content} isStreaming={part.isStreaming || false} />
+                        if (!part.content.trim()) return null
+                        if (isLoading && part.isStreaming) {
+                          return <TypewriterRenderer key={idx} fullText={part.content} isLoading={isLoading} renderContent={(text) => <MarkdownContent content={text} colors={colors} />} />
+                        }
+                        return <MarkdownContent key={idx} content={part.content} colors={colors} />
+                      })
+                    ) : (
+                      <div className="flex items-center gap-1.5 py-0.5">
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse 1.5s ease-in-out infinite' }} />
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ====== AI 继续工作中指示器 — 文本块后，提示用户 AI 还在工作 ====== */}
+      {isLoading && textMsgs.length > 0 && (() => {
+        // 优先判断：是否有正在进行中的工具
+        const hasInProgressTool = msgs.some(m => m.messageType === 'tool_call' && m.status === 'in_progress')
+        const label = hasInProgressTool ? 'AI 正在调用工具...' : 'AI 正在分析...'
+        return (
+          <div className="px-4 py-1 flex gap-2.5">
+            <div className="w-7 shrink-0" />
+            <div
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md"
+              style={{ backgroundColor: colors.accent + '06', border: `1px solid ${colors.accent}10` }}
+            >
+              {/* 三个跳动圆点 */}
+              <div className="flex items-center gap-0.5">
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ backgroundColor: colors.accent, animation: 'bounce-dot 1.2s ease-in-out infinite', animationDelay: '0ms' }}
+                />
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ backgroundColor: colors.accent, animation: 'bounce-dot 1.2s ease-in-out infinite', animationDelay: '200ms' }}
+                />
+                <span
+                  className="w-1.5 h-1.5 rounded-full"
+                  style={{ backgroundColor: colors.accent, animation: 'bounce-dot 1.2s ease-in-out infinite', animationDelay: '400ms' }}
+                />
+              </div>
+              <span className="text-[10px]" style={{ color: colors.textDim }}>{label}</span>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* ====== 摘要（跟随文本块）—— 图标+时间，不重复 🤖 头 ====== */}
+      {summaryMsgs.length > 0 && (
+        <div className="px-4 py-0.5 flex gap-2.5">
+          <div className="w-7 shrink-0" />
+          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)]">
+            <div className="flex items-center gap-1.5 mb-1">
+              <span className="text-[11px]" style={{ color: colors.textSecondary }}>📋 变更摘要</span>
+              <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
+            </div>
+            {summaryMsgs.map(m => (
+              m.changeSummary ? <SessionSummaryCard key={m.id} summary={m.changeSummary} /> : null
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ====== 中断/错误状态提示 ====== */}
+      {!isLoading && errorMsgs.length > 0 && (
+        <div className="px-4 py-1.5 flex gap-2.5">
+          <div className="w-7 shrink-0" />
+          <div
+            className="flex items-center gap-2 px-3 py-2 rounded-lg"
+            style={{
+              backgroundColor: 'rgba(239, 68, 68, 0.08)',
+              border: '1px solid rgba(239, 68, 68, 0.2)',
+            }}
+          >
+            <span className="text-[13px]">⚠️</span>
+            <span className="text-[11px]" style={{ color: '#f87171' }}>
+              {errorMsgs[errorMsgs.length - 1]?.content || '对话已中断'}
+            </span>
+            {onRetry && (
+              <button
+                className="px-2.5 py-0.5 rounded text-[10px] font-medium transition-all hover:opacity-80"
+                style={{ backgroundColor: colors.accent, color: '#fff' }}
+                onClick={onRetry}
+              >
+                ▶ 继续对话
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 function parseToolResultPayload(raw?: string): Record<string, any> | null {
   if (!raw) return null
@@ -32,6 +508,47 @@ function parseToolResultPayload(raw?: string): Record<string, any> | null {
     const match = raw.match(/"path"\s*:\s*"([^"]+)"/)
     return match ? { path: match[1] } : null
   }
+}
+
+/**
+ * 从原始错误信息中提取用户友好的摘要。
+ * Java 异常堆栈、Caused by 等信息会被过滤，只保留核心错误描述。
+ */
+function extractErrorMessage(raw: string): string {
+  if (!raw) return '未知错误'
+  const s = raw.trim()
+
+  // 1. 提取 Caused by 中的核心消息（如 "Server error: 500 Internal Server Error from POST ..."）
+  const causedByMatch = s.match(/Caused by:\s*(.+?)(?:\s+at\s|\s*\.{3}\s+\d+)/s)
+  if (causedByMatch) {
+    let msg = causedByMatch[1].trim()
+    // 截断过长的 URL
+    msg = msg.replace(/(POST|GET|PUT|DELETE)\s+(https?:\/\/[^\s]+)(\s|$)/, '$1 <URL> ')
+    if (msg.length > 200) msg = msg.substring(0, 200) + '...'
+    return msg
+  }
+
+  // 2. 提取第一行有意义的内容（跳过纯堆栈行）
+  const lines = s.split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('at ') || trimmed.startsWith('...')) continue
+    // 跳过纯异常类名行（如 "java.lang.RuntimeException: ..." 但保留冒号后的内容）
+    const colonIdx = trimmed.indexOf(':')
+    if (colonIdx > 0 && colonIdx < 60) {
+      const afterColon = trimmed.substring(colonIdx + 1).trim()
+      if (afterColon) {
+        let msg = afterColon.replace(/(POST|GET|PUT|DELETE)\s+(https?:\/\/[^\s]+)/, '$1 <URL>')
+        if (msg.length > 200) msg = msg.substring(0, 200) + '...'
+        return msg
+      }
+    }
+    // 非堆栈行，直接返回
+    if (trimmed.length < 300) return trimmed
+  }
+
+  // 3. 兜底：截断到合理长度
+  return s.length > 200 ? s.substring(0, 200) + '...' : s
 }
 
 interface RightSidebarProps {
@@ -79,11 +596,15 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     inputText,
     setInputText,
     addMessage,
-    updateMessage,
-    updateMessageSteps,
-    updateMessageTaskBreakdown,
-    updateSubTaskStatus,
-    updateMessageChangeSummary,
+    addToolCallMessage,
+    updateToolMessageStatus,
+    upsertTextMessage,
+    addSummaryMessage,
+    addThinkingMessage,
+    replaceLastThinkingMessage,
+    removeThinkingMessages,
+    addErrorMessage,
+    markGroupInProgressAsFailure,
     editAndRetry,
     clearMessages,
     isLoading,
@@ -97,6 +618,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   } = useAgentStore()
 
   const { connections, currentConnectionId } = useConnectionStore()
+  const streamStatus = useStreamStore(s => s.status)
   const {
     activeBinding,
     bindTerminal,
@@ -389,7 +911,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   useEffect(() => {
     const autoBindCurrentConnection = async () => {
-      console.log('[RightSidebar] autoBindCurrentConnection check: activeTerminalSessionId=', activeTerminalSessionId, 'activeBinding=', activeBinding?.terminalSessionId, 'currentSessionId=', useAgentStore.getState().currentSessionId, 'currentAgentId=', currentAgentId)
       if (!activeTerminalSessionId) return
       if (activeBinding?.terminalSessionId === activeTerminalSessionId) return
       const connection = currentConnectionId
@@ -413,7 +934,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         }
       )
       if (success) {
-        console.log('[RightSidebar] Auto-bound to:', connection.name)
       }
     }
 
@@ -588,11 +1108,14 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       }
     }
 
+    const groupId = `group_${Date.now()}`
     const userMessage: AgentMessage = {
       id: `msg_${Date.now()}`,
       role: 'user',
       content: displayContent,
       timestamp: Date.now(),
+      messageType: 'text',
+      groupId,
     }
     addMessage(sessionId, userMessage)
     setInputText('')
@@ -606,18 +1129,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       setInputKey((k) => k + 1)
     }
 
-    let assistantId = `msg_${Date.now() + 1}`
-    const assistantMessage: AgentMessage = {
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      timestamp: Date.now(),
-      steps: [],
-    }
-    addMessage(sessionId, assistantMessage)
-
-    let fullContent = ''
-    const steps: ReActStep[] = []
+    // 多消息流模式：不需要预创建 assistant 消息，各类型消息由回调动态创建
+    // 但需要立即创建一个"思考中"占位消息，避免用户以为死机
+    addThinkingMessage(sessionId, groupId, '思考中...')
+    let textMsgId = '' // 同一 groupId 下只有一条 text 消息，onText 时 upsert
+    const toolCallMsgMap = new Map<string, string>() // toolCallId → msgId 映射
 
     // 更新 SSE 流状态
     useStreamStore.getState().setStatus('connecting')
@@ -629,186 +1145,109 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       sessionId,
       messageContent,
       (step: ReActStep) => {
-        console.log('[onStep]', step.stepType, step.content?.substring(0, 80))
-        steps.push(step)
-        updateMessageSteps(sessionId, assistantId, steps)
-
-        // 检测命令执行工具 → 写入输出面板
-        const commandExecTools = ['executeLocalCommand', 'compileProject', 'compileTests', 'runUnitTests', 'executeSshCommand']
-        if (step.stepType === 'tool_call' && step.toolName && commandExecTools.includes(step.toolName)) {
-          const outputStore = useOutputStore.getState()
-          const entrySessionId = `step-${step.stepIndex}`
-
-          if (step.status === 'in_progress') {
-            // 命令开始执行 → 创建 running 条目
-            const commandStr = step.toolParams || ''
-            outputStore.addEntry({
-              sessionId: entrySessionId,
-              command: commandStr,
-              status: 'running',
-              stdout: '',
-              stderr: '',
-              exitCode: null,
-              durationMs: null,
-            })
-          } else if (step.status === 'success' || step.status === 'failure') {
-            // 命令执行完成 → 更新条目
-            const existing = outputStore.entries.find((e) => e.sessionId === entrySessionId)
-            if (existing) {
-              // 解析工具返回结果
-              let stdout = ''
-              let stderr = ''
-              let exitCode = -1
-              let durationMs = 0
-
-              if (step.toolResult) {
-                try {
-                  const result = JSON.parse(step.toolResult)
-                  stdout = result.output || result.stdout || ''
-                  stderr = result.stderr || ''
-                  exitCode = result.exitCode ?? -1
-                  durationMs = result.timeoutMs || 0
-                } catch {
-                  stdout = step.toolResult
-                }
-              }
-
-              outputStore.updateEntry(entrySessionId, {
-                status: step.status === 'success' ? 'success' : 'failed',
-                stdout,
-                stderr,
-                exitCode,
-                durationMs,
-              })
-            } else {
-            // 没有找到 in_progress 时创建的条目（可能 step 被合并了），直接创建完成态条目
-              let stdout = ''
-              let exitCode = -1
-              if (step.toolResult) {
-                try {
-                  const result = JSON.parse(step.toolResult)
-                  stdout = result.output || result.stdout || ''
-                  exitCode = result.exitCode ?? -1
-                } catch {
-                  stdout = step.toolResult
-                }
-              }
-              outputStore.addEntry({
-                sessionId: entrySessionId,
-                command: step.toolParams || '',
-                status: step.status === 'success' ? 'success' : 'failed',
-                stdout,
-                stderr: '',
-                exitCode,
-                durationMs: 0,
-              })
-            }
-          }
+        // ── 多消息流：每个 step 生成独立消息 ──
+        if (step.stepType === 'thinking') {
+          // 替换占位"思考中..."消息（如果有）
+          replaceLastThinkingMessage(sessionId, groupId, step.content || '思考中...')
         }
 
-        // 检测文件操作工具完成 → 刷新文件树 + 重载编辑器
-        if (step.stepType === 'tool_call' && step.status === 'success' && step.toolName) {
-          const fileWriteTools = ['writeLocalFile', 'createLocalFile', 'deleteLocalFile', 'writeFile', 'createFile', 'deleteFile']
-          if (fileWriteTools.includes(step.toolName)) {
-            console.log('[onStep] 文件操作工具完成，刷新文件树和编辑器:', step.toolName, 'toolResult=', step.toolResult?.substring(0, 200))
+        else if (step.stepType === 'tool_call') {
+          if (step.status === 'in_progress') {
+            const msgId = addToolCallMessage(
+              sessionId, groupId,
+              step.toolCallId || `tc_${Date.now()}`,
+              step.toolName || 'unknown',
+              step.toolParams || ''
+            )
+            if (step.toolCallId) toolCallMsgMap.set(step.toolCallId, msgId)
 
-            const payload = parseToolResultPayload(step.toolResult)
-            let changedPath = payload?.path as string | undefined
-            // 兜底1: 从 toolParams/args 中提取路径（tool_progress 事件的 summary 不是 JSON）
-            if (!changedPath && step.toolParams) {
-              // toolParams 可能就是文件路径，或包含路径参数
-              const params = step.toolParams.trim()
-              if (params.startsWith('/')) {
-                changedPath = params
+            // 命令执行工具 → 写入输出面板
+            const commandExecTools = ['executeLocalCommand', 'compileProject', 'compileTests', 'runUnitTests', 'executeSshCommand']
+            if (step.toolName && commandExecTools.includes(step.toolName)) {
+              useOutputStore.getState().addEntry({
+                sessionId: `step-${step.stepIndex}`, command: step.toolParams || '',
+                status: 'running', stdout: '', stderr: '', exitCode: null, durationMs: null,
+              })
+            }
+          } else if (step.status === 'success' || step.status === 'failure') {
+            // 更新工具消息状态：先按 toolCallId 匹配，找不到则按 toolName 匹配最后一条 in_progress 消息
+            const tcId = step.toolCallId || ''
+            let msgId = tcId ? toolCallMsgMap.get(tcId) : undefined
+            if (!msgId && step.toolName) {
+              const session = useAgentStore.getState().sessions.get(sessionId)
+              if (session) {
+                const match = [...session.messages]
+                  .reverse()
+                  .find(m => m.messageType === 'tool_call' && m.toolName === step.toolName && m.status === 'in_progress' && m.groupId === groupId)
+                if (match) msgId = match.id
+              }
+            }
+            if (msgId) updateToolMessageStatus(sessionId, msgId, step.status, step.toolResult)
+
+            // 命令执行工具完成 → 更新输出面板
+            const commandExecTools = ['executeLocalCommand', 'compileProject', 'compileTests', 'runUnitTests', 'executeSshCommand']
+            if (step.toolName && commandExecTools.includes(step.toolName)) {
+              const outputStore = useOutputStore.getState()
+              const entrySessionId = `step-${step.stepIndex}`
+              let stdout = '', stderr = '', exitCode = -1, durationMs = 0
+              if (step.toolResult) {
+                try { const r = JSON.parse(step.toolResult); stdout = r.output || r.stdout || ''; stderr = r.stderr || ''; exitCode = r.exitCode ?? -1; durationMs = r.timeoutMs || 0 }
+                catch { stdout = step.toolResult }
+              }
+              if (outputStore.entries.find(e => e.sessionId === entrySessionId)) {
+                outputStore.updateEntry(entrySessionId, { status: step.status === 'success' ? 'success' : 'failed', stdout, stderr, exitCode, durationMs })
               } else {
-                const pathMatch = params.match(/(\/\w[\w./-]+\.[\w]+)/)
-                if (pathMatch) changedPath = pathMatch[1]
+                outputStore.addEntry({ sessionId: entrySessionId, command: step.toolParams || '', status: step.status === 'success' ? 'success' : 'failed', stdout, stderr: '', exitCode, durationMs: 0 })
               }
             }
-            // 兜底2: 从 toolResult 文本中提取路径（非 JSON 格式时）
-            if (!changedPath && step.toolResult) {
-              const m = step.toolResult.match(/([\/][\w./-]+\.[\w]+)/)
-              if (m) changedPath = m[1]
-            }
-            console.log('[onStep] payload=', payload, 'changedPath=', changedPath, 'toolParams=', step.toolParams?.substring(0, 100))
 
-            const isLocalTool = step.toolName.includes('Local')
-            const isDeleteOp = step.toolName === 'deleteLocalFile' || step.toolName === 'deleteFile'
+            // 文件操作工具完成 → 刷新文件树 + 重载编辑器
+            if (step.toolName) {
+              const fileWriteTools = ['writeLocalFile', 'createLocalFile', 'deleteLocalFile', 'writeFile', 'createFile', 'deleteFile', 'editLocalFile', 'editFile', 'editRemoteFile', 'writeRemoteFile', 'CodeEditTool', 'CodeEdit', 'applyEdit', 'applyEditTool']
+              const isFileWriteTool = fileWriteTools.includes(step.toolName) || step.toolName.toLowerCase().includes('edit') || step.toolName.toLowerCase().includes('write')
+              if (isFileWriteTool) {
+                const payload = parseToolResultPayload(step.toolResult)
+                let changedPath = (payload?.path as string | undefined)
+                  || (step.toolParams && /^\//.test(step.toolParams.trim()) ? step.toolParams.trim() : step.toolParams?.match(/(\/\w[\w./-]+\.[\w]+)/)?.[1])
+                  || step.toolResult?.match(/([\/][\w./-]+\.[\w]+)/)?.[1]
 
-            // 本地文件操作
-            if (isLocalTool) {
-              const localStore = useLocalFileStore.getState()
+                const isLocalTool = step.toolName.includes('Local')
+                const isDeleteOp = step.toolName === 'deleteLocalFile' || step.toolName === 'deleteFile'
 
-              // 如果有明确路径，重载对应文件
-              if (changedPath && !isDeleteOp) {
-                const targetTab = localStore.openTabs.find((tab) => tab.path === changedPath)
-                const beforeContent = targetTab?.content ?? ''
-                localStore.reloadFileByPath(changedPath).then((afterContent) => {
-                  if (afterContent != null && afterContent !== beforeContent) {
-                    useAiPatchStore.getState().upsertPreview({
-                      target: 'local',
-                      path: changedPath!,
-                      toolName: step.toolName!,
-                      beforeContent,
-                      afterContent,
-                    })
+                if (isLocalTool) {
+                  const localStore = useLocalFileStore.getState()
+                  if (changedPath && !isDeleteOp) {
+                    const before = localStore.openTabs.find(t => t.path === changedPath)?.content ?? ''
+                    localStore.reloadFileByPath(changedPath).then(after => {
+                      if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, beforeContent: before, afterContent: after })
+                    }).catch(() => {})
                   }
-                }).catch(() => {})
-              }
-
-              // 兜底3: 路径提取失败时，刷新当前活动 tab（本地）
-              if (!changedPath) {
-                const activeTab = localStore.openTabs.find((tab) => tab.key === localStore.activeTabKey)
-                if (activeTab && !isDeleteOp) {
-                  console.log('[onStep] 路径提取失败，兜底刷新当前活动 tab:', activeTab.path)
-                  localStore.reloadFileByPath(activeTab.path).catch(() => {})
+                  if (!changedPath) {
+                    const activeTab = localStore.openTabs.find(t => t.key === localStore.activeTabKey)
+                    if (activeTab && !isDeleteOp) localStore.reloadFileByPath(activeTab.path).catch(() => {})
+                  }
+                  const dir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
+                  if (dir) localStore.refreshDirectory(dir).catch(() => {})
+                  else if (localStore.rootPath) localStore.refreshDirectory(localStore.rootPath).catch(() => {})
                 }
-              }
 
-              // 文件树刷新
-              const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
-              if (changedDir) {
-                localStore.refreshDirectory(changedDir).catch(() => {})
-              } else if (localStore.rootPath) {
-                localStore.refreshDirectory(localStore.rootPath).catch(() => {})
-              }
-            }
-
-            // 远程文件操作
-            if (!isLocalTool) {
-              const connectionId = activeBinding?.connectionId || currentConnectionId
-              if (connectionId) {
-                const fileStore = useFileExplorerStore.getState()
-
-                if (changedPath && !isDeleteOp) {
-                  const targetTab = fileStore.openTabs.find((tab) => tab.connectionId === connectionId && tab.path === changedPath)
-                  const beforeContent = targetTab?.content ?? ''
-                  fileStore.reloadFileByPath(connectionId, changedPath).then((afterContent) => {
-                    if (afterContent != null && afterContent !== beforeContent) {
-                      useAiPatchStore.getState().upsertPreview({
-                        target: 'remote',
-                        path: changedPath!,
-                        connectionId,
-                        toolName: step.toolName!,
-                        beforeContent,
-                        afterContent,
-                      })
+                if (!isLocalTool) {
+                  const connId = activeBinding?.connectionId || currentConnectionId
+                  if (connId) {
+                    const fileStore = useFileExplorerStore.getState()
+                    if (changedPath && !isDeleteOp) {
+                      const before = fileStore.openTabs.find(t => t.connectionId === connId && t.path === changedPath)?.content ?? ''
+                      fileStore.reloadFileByPath(connId, changedPath).then(after => {
+                        if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, beforeContent: before, afterContent: after })
+                      }).catch(() => {})
                     }
-                  }).catch(() => {})
-                }
-
-                // 兜底3: 路径提取失败时，刷新当前活动 tab（远程）
-                if (!changedPath) {
-                  const activeTab = fileStore.openTabs.find((tab) => tab.connectionId === connectionId && tab.key === fileStore.activeTabKey)
-                  if (activeTab && !isDeleteOp) {
-                    console.log('[onStep] 路径提取失败，兜底刷新当前活动远程 tab:', activeTab.path)
-                    fileStore.reloadFileByPath(connectionId, activeTab.path).catch(() => {})
+                    if (!changedPath) {
+                      const activeTab = fileStore.openTabs.find(t => t.connectionId === connId && t.key === fileStore.activeTabKey)
+                      if (activeTab && !isDeleteOp) fileStore.reloadFileByPath(connId, activeTab.path).catch(() => {})
+                    }
+                    const dir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
+                    if (dir) fileStore.refreshDirectory(connId, dir).catch(() => {})
                   }
-                }
-
-                const changedDir = changedPath ? changedPath.substring(0, changedPath.lastIndexOf('/')) : null
-                if (changedDir) {
-                  fileStore.refreshDirectory(connectionId, changedDir).catch(() => {})
                 }
               }
             }
@@ -816,23 +1255,28 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         }
       },
       (fullText: string) => {
-        console.log('[onText]', fullText.substring(0, 80))
-        fullContent = fullText
-        updateMessage(sessionId, assistantId, fullContent)
-        // 标记流式输出中 + 刷新心跳
+        // 流式文本 → 同一 groupId 下只有一条 text 消息
+        // 收到文本时清除占位的 thinking 消息
+        removeThinkingMessages(sessionId, groupId)
+        textMsgId = upsertTextMessage(sessionId, groupId, fullText)
         useStreamStore.getState().setStatus('streaming')
         useStreamStore.getState().touchActivity()
       },
       (finalContent: string) => {
-        console.log('[onDone] finalContent=', finalContent?.substring(0, 80))
-        if (finalContent) {
-          fullContent = finalContent
-          updateMessage(sessionId, assistantId, fullContent)
+        // 完成时清除占位 thinking 消息
+        removeThinkingMessages(sessionId, groupId)
+        if (finalContent && textMsgId) {
+          upsertTextMessage(sessionId, groupId, finalContent)
+        } else if (finalContent && !textMsgId) {
+          upsertTextMessage(sessionId, groupId, finalContent)
         }
         abortRef.current = null
         setLoading(false)
-        useStreamStore.getState().reset()
-        // 完成所有 running 状态的工具输出条目
+        // 仅在无错误时重置 streamStore（部分交付时 onError 已先触发）
+        const streamState = useStreamStore.getState()
+        if (streamState.status !== 'error') {
+          streamState.reset()
+        }
         const outputStore = useOutputStore.getState()
         outputStore.entries.forEach((entry) => {
           if (entry.status === 'running' && entry.sessionId.startsWith('tool-')) {
@@ -842,11 +1286,16 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       },
       (err: string) => {
         console.error('[reactChatStream] error:', err)
-        updateMessage(sessionId, assistantId, `请求失败: ${err}`)
         abortRef.current = null
         setLoading(false)
         useStreamStore.getState().setError(err)
-        // 设置错误恢复卡片 — 根据错误信息智能分类
+
+        // 错误时清除占位 thinking 消息
+        removeThinkingMessages(sessionId, groupId)
+
+        const userFriendlyMsg = extractErrorMessage(err)
+        addErrorMessage(sessionId, groupId, `请求失败: ${userFriendlyMsg}`)
+
         let errorType: ErrorRecovery['type'] = 'unknown'
         let errorTitle = '对话已中断'
         if (err.includes('network') || err.includes('Failed to fetch') || err.includes('fetch') || err.includes('NetworkError') || err.includes('Failed')) {
@@ -863,36 +1312,28 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           errorTitle = '服务暂时不可用'
         }
         setErrorRecovery({
-          type: errorType,
-          title: errorTitle,
-          message: err,
+          type: errorType, title: errorTitle, message: userFriendlyMsg,
+          details: userFriendlyMsg !== err ? err : undefined,
         })
       },
       activeTerminalSessionId || undefined,
-      // onTaskBreakdown: 展示任务拆解卡片
-      (breakdown: TaskBreakdownDTO) => {
-        console.log('[onTaskBreakdown]', breakdown.summary, breakdown.subTasks?.length)
-        updateMessageTaskBreakdown(sessionId, assistantId, breakdown)
+      // onTaskBreakdown
+      (_breakdown: TaskBreakdownDTO) => {
+        // TODO: 多消息流模式下需要新建 task_breakdown 类型消息
       },
-      // onTaskProgress: 更新子任务状态
-      (progress) => {
-        console.log('[onTaskProgress]', progress.subTaskIndex, progress.status)
-        updateSubTaskStatus(sessionId, assistantId, progress.subTaskIndex, progress.status)
+      // onTaskProgress
+      (_progress) => {
       },
-      // onSubAgent: 子代理调用/结果（日志记录，UI 在 steps 中展示）
-      (subAgentInfo) => {
-        console.log('[onSubAgent]', subAgentInfo.agentName, subAgentInfo.status, subAgentInfo.task || subAgentInfo.result || '')
+      // onSubAgent
+      (_subAgentInfo) => {
       },
-      // onChangeSummary: 文件变更摘要 → 自动重载已打开的文件
+      // onChangeSummary
       (changeSummary) => {
-        console.log('[onChangeSummary]', changeSummary.description, changeSummary.created?.length, changeSummary.modified?.length, changeSummary.deleted?.length)
-        updateMessageChangeSummary(sessionId, assistantId, changeSummary)
+        addSummaryMessage(sessionId, groupId, changeSummary)
 
-        // 自动重载所有被修改/创建的已打开文件
         const changedFiles = [...(changeSummary.modified || []), ...(changeSummary.created || [])]
         if (changedFiles.length === 0) return
 
-        // 本地文件重载
         const localStore = useLocalFileStore.getState()
         for (const file of changedFiles) {
           if (localStore.openTabs.some((t) => t.path === file.path)) {
@@ -900,7 +1341,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           }
         }
 
-        // 远程文件重载
         const connectionId = activeBinding?.connectionId || currentConnectionId
         if (connectionId) {
           const fileStore = useFileExplorerStore.getState()
@@ -930,7 +1370,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       // ── 新增 SSE 事件回调 ──
       // onPermissionConfirm: 权限确认请求 → 推入 permissionStore
       (permissionData) => {
-        console.log('[onPermissionConfirm]', permissionData.toolName, permissionData.riskLevel, permissionData.reason)
         usePermissionStore.getState().pushConfirmation({
           ...permissionData,
           arrivedAt: Date.now(),
@@ -938,7 +1377,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       },
       // onToolOutput: 工具实时输出片段 → 更新输出面板
       (toolCallId, outputChunk) => {
-        console.log('[onToolOutput]', toolCallId, outputChunk.substring(0, 80))
         const outputStore = useOutputStore.getState()
         const entrySessionId = `tool-${toolCallId}`
         const existing = outputStore.entries.find((e) => e.sessionId === entrySessionId)
@@ -961,20 +1399,16 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       },
       // onStatus: 状态更新消息 → 更新 streamStore
       (statusMessage) => {
-        console.log('[onStatus]', statusMessage)
         useStreamStore.getState().setStatusMessage(statusMessage)
       },
       // onWarning: 警告消息
-      (warningMessage) => {
-        console.log('[onWarning]', warningMessage)
+      (_warningMessage) => {
       },
       // onRoundStart: 新轮次开始
-      (roundIndex) => {
-        console.log('[onRoundStart] round', roundIndex)
+      (_roundIndex) => {
       },
       // onReconnect: 流中途断开重连
-      (attempt, maxAttempts) => {
-        console.log(`[onReconnect] attempt ${attempt}/${maxAttempts}`)
+      (attempt, _maxAttempts) => {
         useStreamStore.getState().setStatus('reconnecting')
         useStreamStore.getState().setRetrying(attempt)
       },
@@ -993,8 +1427,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       abortRef.current = null
       setLoading(false)
     }
-    // 清除工具进度条状态，避免停止后进度条仍在跑
     toolProgressStore.clear()
+
+    // 将当前 groupId 下所有 in_progress 工具消息标记为 failure
+    if (currentSessionId) {
+      const session = sessions.get(currentSessionId)
+      if (session) {
+        const lastUserMsg = [...session.messages].reverse().find(m => m.role === 'user')
+        if (lastUserMsg?.groupId) {
+          markGroupInProgressAsFailure(currentSessionId, lastUserMsg.groupId)
+        }
+      }
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1116,48 +1560,116 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           }} />
         ) : (
           <div className="py-3 overflow-hidden min-w-0">
-            {currentSession.messages.map((msg, msgIdx) => {
-              const showDivider = msgIdx > 0 && (() => {
-                const prev = currentSession.messages[msgIdx - 1]
-                return shouldInsertTopicDivider(prev, msg).shouldInsert
-              })()
-              const dividerTitle = msgIdx > 0 ? (() => {
-                const prev = currentSession.messages[msgIdx - 1]
-                const result = shouldInsertTopicDivider(prev, msg)
-                return result.title
-              })() : undefined
-              return (
-                <React.Fragment key={msg.id}>
-                  {showDivider && (
-                    <TopicDivider
-                      prevTimestamp={currentSession.messages[msgIdx - 1].timestamp}
-                      currTimestamp={msg.timestamp}
-                      topicIndex={msgIdx}
-                      defaultTitle={dividerTitle}
-                    />
-                  )}
-                  <MessageBubble message={msg} isLoading={isLoading} onEditRetry={(msgId) => {
-                    if (currentSessionId) {
-                      editAndRetry(currentSessionId, msgId)
-                      // 聚焦输入框
-                      setTimeout(() => inputRef.current?.focus(), 50)
-                    }
-                  }} />
-                </React.Fragment>
-              )
-            })}
-            {isLoading && (
-              <div className="px-4 py-2 flex justify-start">
-                <div className="px-3.5 py-2.5 flex items-center gap-2" style={{ backgroundColor: colors.bgTertiary, borderRadius: '12px 12px 12px 2px' }}>
-                  <div className="flex gap-1">
-                    {[0, 150, 300].map((delay) => (
-                      <span key={delay} className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: `pulse-dot 1.4s ${delay}ms infinite ease-in-out both` }} />
-                    ))}
-                  </div>
-                  <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
-                </div>
-              </div>
-            )}
+            {/* 消息分组渲染：同 groupId 的 assistant 消息聚合为一个 AI 回合块 */}
+            {(() => {
+              type AiTurnItem = {
+                type: 'aiTurn'
+                groupId: string
+                msgs: AgentMessage[]
+                startIdx: number
+                timestamp: number
+                showDivider: boolean
+                dividerTitle?: string
+              }
+              type SingleItem = {
+                type: 'single'
+                msg: AgentMessage
+                msgIdx: number
+                showDivider: boolean
+                dividerTitle?: string
+              }
+              type RenderItem = AiTurnItem | SingleItem
+
+              const items: RenderItem[] = []
+              let i = 0
+              while (i < currentSession.messages.length) {
+                const msg = currentSession.messages[i]
+                const showDivider = i > 0 && (() => {
+                  const prev = currentSession.messages[i - 1]
+                  if (msg.groupId && prev.groupId && msg.groupId !== prev.groupId) return true
+                  return shouldInsertTopicDivider(prev, msg).shouldInsert
+                })()
+                const dividerTitle = i > 0 ? (() => {
+                  const prev = currentSession.messages[i - 1]
+                  if (msg.groupId && prev.groupId && msg.groupId !== prev.groupId) return '新对话'
+                  return shouldInsertTopicDivider(prev, msg).title
+                })() : undefined
+
+                // 用户消息 → single
+                if (msg.role === 'user') {
+                  items.push({ type: 'single', msg, msgIdx: i, showDivider, dividerTitle })
+                  i++
+                  continue
+                }
+
+                // assistant 消息有 groupId → 聚合同 groupId 的所有 assistant 消息为一个 AI 回合
+                if (msg.groupId && msg.role === 'assistant') {
+                  const groupMsgs: AgentMessage[] = [msg]
+                  let j = i + 1
+                  while (j < currentSession.messages.length && currentSession.messages[j].groupId === msg.groupId && currentSession.messages[j].role === 'assistant') {
+                    groupMsgs.push(currentSession.messages[j])
+                    j++
+                  }
+                  items.push({ type: 'aiTurn', groupId: msg.groupId, msgs: groupMsgs, startIdx: i, timestamp: msg.timestamp, showDivider, dividerTitle })
+                  i = j
+                  continue
+                }
+
+                // 兜底：无 groupId 的 assistant 消息 → single
+                items.push({ type: 'single', msg, msgIdx: i, showDivider, dividerTitle })
+                i++
+              }
+
+              const { colors } = useThemeStore.getState()
+
+              return items.map((item, idx) => {
+                const dividerEl = item.showDivider ? (
+                  <TopicDivider
+                    prevTimestamp={currentSession.messages[item.type === 'single' ? item.msgIdx : item.startIdx - 1]?.timestamp || 0}
+                    currTimestamp={item.type === 'single' ? item.msg.timestamp : item.timestamp}
+                    topicIndex={item.type === 'single' ? item.msgIdx : item.startIdx}
+                    defaultTitle={item.dividerTitle}
+                  />
+                ) : null
+
+                // 用户消息或兜底单条消息
+                if (item.type === 'single') {
+                  return (
+                    <React.Fragment key={`single_${item.msg.id}_${idx}`}>
+                      {dividerEl}
+                      <MessageBubble message={item.msg} isLoading={isLoading} onEditRetry={(msgId) => {
+                        if (currentSessionId) {
+                          editAndRetry(currentSessionId, msgId)
+                          setTimeout(() => inputRef.current?.focus(), 50)
+                        }
+                      }} />
+                    </React.Fragment>
+                  )
+                }
+
+                // AI 回合块
+                return (
+                  <React.Fragment key={`aiturn_${item.groupId}_${idx}`}>
+                    {dividerEl}
+                    <AiTurnBlock msgs={item.msgs} colors={colors} isLoading={isLoading} streamStatus={streamStatus} onRetry={() => {
+                      setErrorRecovery(null)
+                      if (currentSession && currentSession.messages.length >= 2) {
+                        const lastUserMsg = [...currentSession.messages].reverse().find(m => m.role === 'user')
+                        if (lastUserMsg) {
+                          const inputEl = inputRef.current
+                          if (inputEl) {
+                            inputEl.innerText = lastUserMsg.content || ''
+                          }
+                          setTimeout(() => handleSend(), 100)
+                        }
+                      } else if (inputRef.current) {
+                        setTimeout(() => handleSend(), 100)
+                      }
+                    }} />
+                  </React.Fragment>
+                )
+              })
+            })()}
             {/* 错误恢复卡片 */}
             {errorRecovery && (
               <div className="px-4 py-2">
@@ -1166,27 +1678,22 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   canRetry={true}
                   onRetry={() => {
                     setErrorRecovery(null)
-                    // 重试：重新发送最后一条用户消息（含标签）
                     if (currentSession && currentSession.messages.length >= 2) {
                       const lastUserMsg = [...currentSession.messages].reverse().find(m => m.role === 'user')
                       if (lastUserMsg) {
-                        // 恢复文本到输入框
                         const inputEl = inputRef.current
                         if (inputEl) {
                           inputEl.innerText = lastUserMsg.content || ''
                         }
-                        // 延迟触发发送，让 DOM 更新完成
                         setTimeout(() => handleSend(), 100)
                       }
                     } else if (inputRef.current) {
-                      // 没有历史消息时，直接重新发送当前输入框内容
                         setTimeout(() => handleSend(), 100)
                     }
                   }}
                   onSkip={() => setErrorRecovery(null)}
                   onResetContext={() => {
                     setErrorRecovery(null)
-                    // 清空当前会话消息以重置上下文
                     if (currentSessionId) {
                       useAgentStore.getState().clearMessages(currentSessionId)
                     }
@@ -1223,6 +1730,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           <div className="w-1 h-1 rounded-full bg-gray-400" />
         </div>
       </div>
+
+      {/* 产物汇总面板 — 参考 Android 端设计，放在输入框上方 */}
+      <ArtifactSummaryPanel />
 
       {/* SSH 未连接提示 */}
       {currentAgentId === '100000' && !activeTerminalSessionId && (
@@ -1512,7 +2022,6 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   if (currentSessionId) useAgentStore.getState().clearMessages(currentSessionId)
                 } else if (item.id === 'reset') {
                   // TODO: 重置上下文 API 待后端提供
-                  console.log('Reset context - API not yet available')
                 } else if (item.id === 'export') {
                   // 导出对话
                   if (currentSession) {

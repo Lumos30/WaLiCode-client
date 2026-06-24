@@ -21,19 +21,30 @@ export default defineConfig({
   clearScreen: false,
   build: {
     sourcemap: false,
+    chunkSizeWarningLimit: 1000, // Monaco Editor 核心包 >500KB 属于正常
     rollupOptions: {
       output: {
-        manualChunks: {
-          // React 核心
-          'react-vendor': ['react', 'react-dom'],
-          // Monaco 编辑器
-          'monaco-vendor': ['@monaco-editor/react', 'monaco-editor'],
-          // 终端
-          'xterm-vendor': ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-web-links', '@xterm/addon-webgl'],
-          // Markdown 渲染
-          'markdown-vendor': ['react-markdown', 'remark-gfm', 'rehype-highlight', 'highlight.js', 'lowlight'],
-          // Tauri API
-          'tauri-vendor': ['@tauri-apps/api', '@tauri-apps/plugin-dialog', '@tauri-apps/plugin-fs', '@tauri-apps/plugin-opener'],
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            // React 核心 + ReactDOM（必须在同一个 chunk，避免循环依赖）
+            if (id.includes('/react-dom/') || id.match(/\/react\/(index|cjs)/) || id.includes('/react/')) {
+              return 'react-vendor'
+            }
+            // Monaco 编辑器 — 核心与 React 绑定拆分
+            if (id.includes('/monaco-editor/')) return 'monaco-core'
+            if (id.includes('/@monaco-editor/')) return 'monaco-react'
+            // 终端
+            if (id.includes('/@xterm/')) return 'xterm-vendor'
+            // Markdown 渲染 — 按子包拆分
+            if (id.includes('/react-markdown/')) return 'markdown-react'
+            if (id.includes('/remark-') || id.includes('/rehype-') || id.includes('/unified/') || id.includes('/unist/') || id.includes('/vfile/') || id.includes('/micromark/') || id.includes('/mdast-')) return 'markdown-parse'
+            if (id.includes('/lowlight/') || id.includes('/highlight.js/') || id.includes('/highlight.js-')) return 'highlight-vendor'
+            // Tauri API
+            if (id.includes('/@tauri-apps/')) return 'tauri-vendor'
+            // Zustand + 状态管理
+            if (id.includes('/zustand/')) return 'app-state'
+            // 其他 node_modules → 不单独拆分，让 Vite 自动处理
+          }
         },
       },
     },

@@ -157,6 +157,7 @@ export interface ReActStep {
   toolName?: string
   toolParams?: string
   toolResult?: string
+  toolCallId?: string
   status: 'in_progress' | 'success' | 'failure'
   error?: string
 }
@@ -352,8 +353,10 @@ export function reactChatStream(
               if (!isAborted) doFetch()
             }, cfg.streamReconnectBaseDelay * streamReconnectCount)
           } else if (lastFullText) {
-            // 已达重连上限，但有累积内容 → 交付已有内容
+            // 已达重连上限，但有累积内容 → 交付已有内容 + 标记中断
             console.warn('[SSE] reconnect exhausted, delivering partial content')
+            // 先通知中断（让前端显示恢复卡片），再交付部分内容
+            onError('SSE 连接中断，部分内容可能不完整')
             if (!doneCalled) {
               doneCalled = true
               onDone(lastFullText)
@@ -502,15 +505,6 @@ export function reactChatStream(
             if (!finalContent && lastFullText) {
               finalContent = lastFullText
             }
-            // SSE done event received
-            // result 步骤始终携带最终 content，用于渲染
-            const resultStep: ReActStep = {
-              stepType: 'result',
-              stepIndex: ++stepCounter,
-              status: 'success',
-              content: finalContent || '',  // 始终设置 content，避免 undefined
-            }
-            onStep(resultStep)
             // 传递文件变更摘要
             if (event.changeSummary) {
               onChangeSummary?.(event.changeSummary)
@@ -526,13 +520,16 @@ export function reactChatStream(
           }
 
           case 'error': {
-            // 错误
+            // 错误事件：同时通知 onStep（渲染到对话中）和 onError（触发 ErrorRecoveryCard）
+            const errorMsg = event.content || '未知错误'
             onStep({
               stepType: 'result',
               stepIndex: ++stepCounter,
-              error: event.content || '未知错误',
+              error: errorMsg,
               status: 'failure',
             })
+            // 触发错误恢复卡片
+            onError(errorMsg)
             break
           }
 

@@ -151,7 +151,7 @@ export function LocalTerminal({
       })
     })
 
-    // ResizeObserver
+    // ResizeObserver（debounced，避免频繁 resize 导致 shell 重绘 prompt）
     const ro = new ResizeObserver(() => {
       if (resizeTimerRef.current) return
       resizeTimerRef.current = setTimeout(() => {
@@ -166,20 +166,33 @@ export function LocalTerminal({
     })
     ro.observe(container)
 
-    // 创建 PTY 会话
-    spawnLocalPty({
-      sessionId: sid,
-      cwd,
-      cols: term.cols,
-      rows: term.rows,
-    })
-      .then(() => {
-        lastSentSizeRef.current = { cols: term.cols, rows: term.rows }
-        onSessionChange?.(sid)
+    // 延迟创建 PTY：等待 DOM 布局稳定后再 spawn，避免初始 size 不准导致多次 SIGWINCH
+    // requestAnimationFrame 确保 open + fit 已渲染，再延迟一帧让 ResizeObserver 首次 fit 完成
+    let rafId1: number
+    let rafId2: number
+    const scheduleSpawn = () => {
+      rafId1 = requestAnimationFrame(() => {
+        fitAddon.fit()
+        rafId2 = requestAnimationFrame(() => {
+          // 此时 DOM 已稳定，尺寸准确
+          const { cols, rows } = term
+          lastSentSizeRef.current = { cols, rows }
+          spawnLocalPty({
+            sessionId: sid,
+            cwd,
+            cols,
+            rows,
+          })
+            .then(() => {
+              onSessionChange?.(sid)
+            })
+            .catch((err) => {
+              term.writeln(`\x1b[31m创建本地终端失败: ${err}\x1b[0m`)
+            })
+        })
       })
-      .catch((err) => {
-        term.writeln(`\x1b[31m创建本地终端失败: ${err}\x1b[0m`)
-      })
+    }
+    scheduleSpawn()
 
     // 右键菜单
     container.addEventListener('contextmenu', (e) => {
@@ -205,6 +218,9 @@ export function LocalTerminal({
 
     // 清理
     return () => {
+      cancelAnimationFrame(rafId1)
+      cancelAnimationFrame(rafId2)
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
       onDataDisposable.dispose()
       ro.disconnect()
       unlistenOutputRef.current?.()
