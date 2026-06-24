@@ -334,12 +334,14 @@ export function MarkdownContent({ content, colors, isUser }: { content: string; 
   const textColor = isUser ? colors.userBubbleText : colors.text
   const linkColor = isUser ? '#93c5fd' : colors.accent
 
-  if (!content || !content.trim()) return null
-
+  // ⚠️ Hook 规则：useMemo 必须在条件 return 之前调用
   const processedContent = useMemo(() => {
+    if (!content || !content.trim()) return ''
     const normalized = cleanMarkdown(content)
     return normalized.replace(/(?<!\]\()(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`)
   }, [content])
+
+  if (!content || !content.trim()) return null
 
   return (
     <ReactMarkdown

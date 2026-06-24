@@ -310,8 +310,6 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   isLoading?: boolean
 }) {
   const processSteps = steps.filter(s => s.stepType !== 'result')
-  if (processSteps.length === 0) return null
-
   const allDone = processSteps.every(s => s.status !== 'in_progress')
   // 三级展开模式：collapsed → compact → expanded
   const [expandMode, setExpandMode] = useState<ExpandMode>('collapsed')
@@ -324,9 +322,10 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   // 是否已经触发过自动折叠
   const autoCollapsedRef = useRef(false)
 
+  // 流式/加载中 → compact（显示进度但不占太多空间）
+  // ⚠️ 仅对本消息自身的流式状态响应，已完成的旧消息不受全局 isLoading 影响
   React.useEffect(() => {
-    // 流式/加载中 → compact（显示进度但不占太多空间）
-    // ⚠️ 仅对本消息自身的流式状态响应，已完成的旧消息不受全局 isLoading 影响
+    if (processSteps.length === 0) return
     const hasActiveSteps = processSteps.some(s => s.status === 'in_progress')
     if ((isStreaming || (isLoading && hasActiveSteps)) && expandMode === 'collapsed' && !userToggledRef.current) {
       setExpandMode('compact')
@@ -334,14 +333,12 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     }
   }, [isStreaming, isLoading, processSteps])
 
-  const toolSteps = processSteps.filter(s => s.stepType === 'tool_call')
-  const thinkingSteps = processSteps.filter(s => s.stepType === 'thinking')
-
   // 核心自动折叠：检测 isStreaming||isLoading 从 true→false 的跳变
   // 有文件变更时 → 折叠到 compact（保留变更可见性）+ 延迟 3s
-  // 无文件变更时 → 折叠到 collapsed + 延迟 1.5s
+  // 无文件变更时 → 抝叠到 collapsed + 延迟 1.5s
   // ⚠️ 仅对本消息自身的流式状态响应，忽略全局 isLoading 对已完成消息的影响
   React.useEffect(() => {
+    if (processSteps.length === 0) return
     const hasActiveSteps = processSteps.some(s => s.status === 'in_progress')
     const wasStreaming = prevStreamingRef.current
     const nowStreaming = isStreaming || (isLoading && hasActiveSteps)
@@ -358,8 +355,14 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
       }, delay)
       return () => clearTimeout(timer)
     }
-  }, [allDone, isStreaming, isLoading, toolSteps])
+  }, [allDone, isStreaming, isLoading, processSteps])
 
+  // ⚠️ Hook 规则：所有 Hook 必须在条件 return 之前调用
+  // processSteps 为空时直接返回 null，但 Hook 数量必须与上一次渲染一致
+  if (processSteps.length === 0) return null
+
+  const toolSteps = processSteps.filter(s => s.stepType === 'tool_call')
+  const thinkingSteps = processSteps.filter(s => s.stepType === 'thinking')
   const toolCount = toolSteps.length
   const thinkingCount = thinkingSteps.length
   const successCount = processSteps.filter(s => s.status === 'success').length
