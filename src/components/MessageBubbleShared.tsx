@@ -1,6 +1,12 @@
 /**
- * 共享工具函数和类型
- * MessageBubble 和 MessageStream 共用
+ * 共享工具函数和组件
+ * 统一供 AiTurnBlock / MessageBubble / MessageStream 使用
+ *
+ * 重构说明：
+ * - 移除前端 normalizeMarkdown（后端 MarkdownNormalizer 已处理）
+ * - 前端 cleanMarkdown 作为兜底（加粗空格 + 连续空行 + 代码块保护）
+ * - 统一工具图标/分组/分类函数
+ * - 精简 ToolCallView 为单行折叠
  */
 import React, { useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -11,7 +17,7 @@ import { useThemeStore } from '../stores/themeStore'
 import type { ReActStep } from '../api/agent'
 
 // ═══════════════════════════════════════════════════════════════
-//  工具分组接口
+//  类型
 // ═══════════════════════════════════════════════════════════════
 
 export interface ToolGroup {
@@ -33,10 +39,16 @@ export function formatTime(timestamp: number): string {
   return `${hh}:${mm}`
 }
 
+/**
+ * 分割 \x3Cthink\x3E...\x3C/think\x3E 标签
+ * 后端虽不推送 thinking 事件，但 AI 文本中可能内嵌 think 标签
+ */
 export function splitThinkTags(content: string): Array<{ type: 'think' | 'text'; content: string; isStreaming?: boolean }> {
   if (!content) return []
   const parts: Array<{ type: 'think' | 'text'; content: string; isStreaming?: boolean }> = []
-  const regex = /<think>([\s\S]*?)(<\/think>|$)/g
+  const thinkOpen = String.fromCharCode(60) + 'think' + String.fromCharCode(62)
+  const thinkClose = String.fromCharCode(60) + '/think' + String.fromCharCode(62)
+  const regex = new RegExp(thinkOpen + '([\\s\\S]*?)(' + thinkClose.replace(/\//g, '\\/') + '|$)', 'g')
   let lastIndex = 0
   let match: RegExpExecArray | null
 
@@ -47,7 +59,7 @@ export function splitThinkTags(content: string): Array<{ type: 'think' | 'text';
     parts.push({
       type: 'think',
       content: match[1].trim(),
-      isStreaming: !match[2] || match[2] !== '</think>',
+      isStreaming: !match[2] || match[2] !== thinkClose,
     })
     lastIndex = match.index + match[0].length
   }
@@ -231,85 +243,57 @@ export function getToolIconInfo(toolName: string): { icon: React.ReactNode; colo
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  Markdown 格式规范化
+//  极简 Markdown 兜底处理（后端 MarkdownNormalizer 已做主要工作）
 // ═══════════════════════════════════════════════════════════════
 
-export function normalizeMarkdown(text: string): string {
-  if (!text) return text
-  let result = text
+/**
+ * 兜底 Markdown 清理
+ * 1. 保护代码块
+ * 2. ** text ** → **text**（加粗标记内空格清理）
+ * 3. 连续 3+ 空行 → 2 空行
+ */
+function cleanBoldSpaces(text: string): string {
+  if (!text || !text.includes('**')) return text
+  const sb: string[] = []
+  let i = 0
+  let inBold = false
+  while (i < text.length) {
+    if (i + 1 < text.length && text[i] === '*' && text[i + 1] === '*') {
+      if (!inBold) {
+        // 开标签 **：跳过后续空格
+        sb.push('**')
+        i += 2
+        while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
+        inBold = true
+      } else {
+        // 闭标签 **：移除已累积的尾部空格
+        while (sb.length > 0 && (sb[sb.length - 1] === ' ' || sb[sb.length - 1] === '\t')) sb.pop()
+        sb.push('**')
+        i += 2
+        inBold = false
+      }
+    } else {
+      sb.push(text[i])
+      i++
+    }
+  }
+  return sb.join('')
+}
 
+function cleanMarkdown(text: string): string {
+  if (!text) return text
+  // 保护代码块
   const codeBlocks: string[] = []
-  result = result.replace(/```[\s\S]*?```/g, (m) => {
+  let result = text.replace(/```[\s\S]*?```/g, (m) => {
     codeBlocks.push(m)
     return `\x00CB${codeBlocks.length - 1}\x00`
   })
-
-  result = result.replace(/\|\|/g, '|\n|')
-  result = result.replace(/(#{1,6})([^\s#\n])/g, '$1 $2')
-  result = result.replace(/([^\n#])(#{1,6}\s)/g, '$1\n\n$2')
-  result = result.replace(/(#{1,6}\s[^\n#*\d]+?)(\*\*)/g, '$1\n\n$2')
-  result = result.replace(/(#{1,6}\s[^|\n]+)(\|)/g, '$1\n\n$2')
-
-  const sentenceStarts = ['这是一个', '这是', '它是', '该系统', '该项目', '我们', '以下', '其中', '它通过', '它基于']
-  result = result.replace(/^(#{1,6}\s)([^\n]+)$/gm, (match, prefix, content) => {
-    for (const start of sentenceStarts) {
-      const idx = content.indexOf(start)
-      if (idx >= 2 && idx <= 12) {
-        return prefix + content.substring(0, idx) + '\n\n' + content.substring(idx)
-      }
-    }
-    return match
-  })
-
-  result = result.replace(/([^\n])(\d+\.\s)/g, '$1\n$2')
-  result = result.replace(/([^\n])(```)/g, '$1\n$2')
-  result = result.replace(/([^\n-])(---)/g, '$1\n$2')
-  result = result.replace(/(---)([^\n|-])/g, '$1\n$2')
-
-  result = result.replace(/([^\n])\n(#{1,6}\s)/g, '$1\n\n$2')
-  result = result.replace(/(^|\n)(#{1,6}\s[^\n]+)(\n)(?!\n|#{1,6}\s)/gm, '$1$2$3\n')
-  result = result.replace(/([^\n])\n(```)/g, '$1\n\n$2')
-  result = result.replace(/([^\n|])\n(\|)/g, '$1\n\n$2')
-  result = result.replace(/(\|[^\n]+)\n(?!\n|\|)([^\n|])/g, '$1\n\n$2')
-  result = result.replace(/([^\n])\n(---)/g, '$1\n\n$2')
-  result = result.replace(/(---)\n([^\n])/g, '$1\n\n$2')
-  result = result.replace(/(\d+\.\s[^\n]+)\n\n(\d+\.\s)/g, '$1\n$2')
-
-  result = result.replace(/^\|([-:\s|]+)\|$/gm, (match, inner: string) => {
-    if (!inner.includes('-')) return match
-    const cells = inner.split('|').map(c => ' ' + c.trim() + ' ')
-    return '|' + cells.join('|') + '|'
-  })
-
-  // 单行长文本拆分：按中文句末标点（。！？）或英文句末标点（.!?）后跟中文/大写字母 → 插入换行
-  // 这处理 LLM 输出整段无换行的情况（后端 MarkdownNormalizer 的前端兜底）
-  result = result.replace(/([。！？!?])([\u4e00-\u9fa5A-Z])/g, '$1\n\n$2')
-
-  // 普通文本行之间的单换行 → 双换行（段落分隔）
-  // 条件：前一行和后一行都不是列表、标题、代码、表格等 Markdown 元素
-  const isSpecialLine = (line: string) =>
-    /^(\s*[*+\-]\s|\s*\d+\.\s|\s*#{1,6}\s|\s*```|\s*\||\s*>|\s*---|\s*<!--|\s*\-\-\-)/.test(line)
-  const lines = result.split('\n')
-  const processed: string[] = []
-  for (let i = 0; i < lines.length; i++) {
-    processed.push(lines[i])
-    if (i < lines.length - 1) {
-      const cur = lines[i].trim()
-      const next = lines[i + 1].trim()
-      // 当前行和下一行都是非空普通文本 → 插入额外换行
-      if (cur && next && !isSpecialLine(cur) && !isSpecialLine(next)) {
-        // 检查下一行是否已经紧跟一个空行
-        if (i + 2 >= lines.length || lines[i + 2].trim() !== '') {
-          processed.push('')
-        }
-      }
-    }
-  }
-  result = processed.join('\n')
-
+  // 加粗标记空格清理（状态机，成对处理）
+  result = cleanBoldSpaces(result)
+  // 连续 3+ 空行 → 2 空行
   result = result.replace(/\n{3,}/g, '\n\n')
+  // 还原代码块
   result = result.replace(/\x00CB(\d+)\x00/g, (_m, idx: string) => codeBlocks[parseInt(idx)])
-
   return result
 }
 
@@ -352,11 +336,10 @@ export function MarkdownContent({ content, colors, isUser }: { content: string; 
 
   if (!content || !content.trim()) return null
 
-  const normalizedContent = useMemo(() => normalizeMarkdown(content), [content])
-  const contentWithImages = useMemo(
-    () => normalizedContent.replace(/(?<!\]\()(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`),
-    [normalizedContent]
-  )
+  const processedContent = useMemo(() => {
+    const normalized = cleanMarkdown(content)
+    return normalized.replace(/(?<!\]\()(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]{100,})/g, (match) => `![](${match})`)
+  }, [content])
 
   return (
     <ReactMarkdown
@@ -408,7 +391,7 @@ export function MarkdownContent({ content, colors, isUser }: { content: string; 
         },
       }}
     >
-      {contentWithImages}
+      {processedContent}
     </ReactMarkdown>
   )
 }
@@ -456,11 +439,12 @@ export function ThinkingBlock({ content, isStreaming }: { content: string; isStr
   )
 }
 
-/** 工具调用步骤视图 */
+/** 工具调用步骤视图（单行折叠） */
 export function ToolCallView({ step, colors, compact }: { step: ReActStep; colors: ReturnType<typeof useThemeStore.getState>['colors']; compact?: boolean }) {
   const [expanded, setExpanded] = React.useState(false)
   const toolName = step.toolName || '工具'
-  const toolInfo = getToolIconInfo(toolName)
+  const label = extractToolLabel(step)
+  const paramSummary = step.toolParams ? step.toolParams.substring(0, 80) : ''
 
   if (compact) {
     return (
@@ -470,30 +454,32 @@ export function ToolCallView({ step, colors, compact }: { step: ReActStep; color
           {step.status === 'in_progress' && <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: '#f59e0b' }} />}
           {step.status === 'success' && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: '#22c55e' }} />}
           {step.status === 'failure' && <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: '#ef4444' }} />}
+          {label !== toolName && <span className="text-[10px] opacity-70 truncate">· {label}</span>}
         </div>
-        {step.toolParams && (
-          <div className="mt-0.5 font-mono text-[10px] truncate opacity-70" style={{ maxWidth: '100%' }}>{step.toolParams.substring(0, 120)}</div>
+        {paramSummary && (
+          <div className="mt-0.5 font-mono text-[10px] truncate opacity-70" style={{ maxWidth: '100%' }}>{paramSummary}</div>
         )}
       </div>
     )
   }
 
   return (
-    <div className="rounded-lg overflow-hidden my-1" style={{ border: `1px solid ${colors.border}30`, backgroundColor: `${colors.bgSecondary}40` }}>
-      <button onClick={() => setExpanded(!expanded)} className="w-full flex items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-black/5">
-        <div className="flex items-center justify-center w-5 h-5 rounded shrink-0" style={{ backgroundColor: toolInfo.bgColor, color: toolInfo.color }}>
-          {step.status === 'in_progress' ? (
-            <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-          ) : toolInfo.icon}
-        </div>
-        <span className="text-[11px] font-medium truncate" style={{ color: colors.text }}>{toolName}</span>
-        {step.status === 'in_progress' && <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-auto" style={{ backgroundColor: '#f59e0b' }} />}
-        {step.status === 'success' && <span className="w-1.5 h-1.5 rounded-full ml-auto" style={{ backgroundColor: '#22c55e' }} />}
-        {step.status === 'failure' && <span className="w-1.5 h-1.5 rounded-full ml-auto" style={{ backgroundColor: '#ef4444' }} />}
+    <div className="my-0.5">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left rounded transition-colors hover:bg-black/5"
+      >
+        {step.status === 'in_progress' && <span className="w-1.5 h-1.5 rounded-full animate-pulse shrink-0" style={{ backgroundColor: '#f59e0b' }} />}
+        {step.status === 'success' && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: '#22c55e' }} />}
+        {step.status === 'failure' && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: '#ef4444' }} />}
+        <span className="text-[11px] font-medium shrink-0" style={{ color: colors.text }}>{toolName}</span>
+        {label !== toolName && <span className="text-[11px] opacity-60 truncate">{label}</span>}
+        {paramSummary && <span className="text-[10px] font-mono opacity-40 truncate hidden sm:inline">{paramSummary}</span>}
+        <div className="flex-1" />
         <svg className={`w-3 h-3 transition-transform shrink-0 ${expanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
       </button>
       {expanded && (
-        <div className="px-3 pb-2 text-[11px] space-y-1" style={{ color: colors.textSecondary }}>
+        <div className="px-3 pb-2 text-[11px] space-y-1.5" style={{ color: colors.textSecondary }}>
           {step.toolParams && (
             <div>
               <span className="font-medium" style={{ color: colors.textDim }}>参数:</span>

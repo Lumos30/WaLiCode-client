@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo } from 'react'
+import React, { useRef, useEffect, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useConnectionStore } from '../stores/connectionStore'
@@ -23,10 +23,91 @@ import { ArtifactSummaryPanel } from './ArtifactSummaryPanel'
 import { CommandMenu, useCommandMenu, type MenuItem } from './CommandMenu'
 import { ToolProgressBar, toolProgressStore } from './ToolProgressBar'
 import { ShortcutHelp } from './ShortcutHelp'
-import { MarkdownContent, ThinkingBlock, splitThinkTags } from './MessageBubbleShared'
+import { MarkdownContent, ThinkingBlock, splitThinkTags, classifyTool, getToolIconInfo, STEP_COLORS } from './MessageBubbleShared'
 import { TypewriterRenderer } from './TypewriterRenderer'
 import { ChatExport } from './ChatExport'
 import { EmptyState } from './EmptyState'
+
+// ===== SidebarToolCategory — RightSidebar 中按分类聚合的工具卡片 =====
+function SidebarToolCategory({ category, colors }: {
+  category: { type: string; label: string; color: string; bgColor: string; icon: React.ReactNode; msgs: AgentMessage[] }
+  colors: ReturnType<typeof useThemeStore.getState>['colors']
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const allDone = category.msgs.every(m => m.status !== 'in_progress')
+  const anyInProgress = category.msgs.some(m => m.status === 'in_progress')
+  const failCount = category.msgs.filter(m => m.status === 'failure').length
+
+  return (
+    <div className="rounded-lg overflow-hidden" style={{ border: `1px solid ${category.color}20` }}>
+      {/* 分类头 */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-1.5 px-2 py-1.5 transition-colors hover:bg-black/[0.03] min-w-0"
+        style={{ backgroundColor: category.bgColor }}
+      >
+        <span className="flex items-center justify-center w-4 h-4 rounded flex-shrink-0" style={{ backgroundColor: `${category.color}18`, color: category.color, fontSize: '10px' }}>
+          {category.icon}
+        </span>
+        <span className="text-[10px] font-semibold flex-shrink-0" style={{ color: category.color }}>
+          {category.label}
+        </span>
+        <span className="text-[9px] tabular-nums px-1 rounded-full font-medium flex-shrink-0" style={{
+          backgroundColor: `${category.color}12`,
+          color: category.color,
+          border: `1px solid ${category.color}25`,
+        }}>
+          ×{category.msgs.length}
+        </span>
+        {allDone && (
+          <span className="text-[9px] flex-shrink-0 font-medium" style={{ color: failCount > 0 ? '#ef4444' : '#22c55e' }}>
+            ✓ {category.msgs.length - failCount}/{category.msgs.length}
+          </span>
+        )}
+        {anyInProgress && (
+          <span className="text-[9px] flex-shrink-0 animate-pulse" style={{ color: '#f59e0b' }}>● 执行中</span>
+        )}
+        <div className="flex-1" />
+        <svg className={`w-2.5 h-2.5 transition-transform flex-shrink-0 ${expanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim, opacity: 0.5 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {/* 展开后: 工具列表 */}
+      {expanded && (
+        <div className="px-2 py-1.5 space-y-0.5" style={{ borderTop: `1px solid ${category.color}15` }}>
+          {category.msgs.map(m => {
+            const summary = extractToolSummaryGlobal(m.toolName || '', m.toolParams)
+            const dotColor = m.status === 'success' ? '#4ade80' : m.status === 'failure' ? '#f87171' : colors.accent
+            const toolInfo = getToolIconInfo(m.toolName || '')
+            return (
+              <div key={m.id} className="flex items-center gap-1.5 py-0.5 min-w-0">
+                <span className="shrink-0 rounded-full" style={{ width: 4, height: 4, backgroundColor: dotColor }} />
+                <span className="text-[10px] font-medium shrink-0 truncate" style={{ color: colors.text }}>{toolInfo.label}</span>
+                {summary && (
+                  <span className="text-[9px] font-mono truncate" style={{ color: colors.textDim }}>{summary}</span>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 全局工具摘要提取（供 SidebarToolCategory 使用）
+function extractToolSummaryGlobal(toolName: string, toolParams?: string): string {
+  if (!toolParams) return ''
+  const lower = toolName.toLowerCase()
+  if (lower.includes('exec') || lower.includes('command') || lower.includes('ssh')) {
+    const cmd = toolParams.trim().split('\n')[0]
+    return cmd.length > 50 ? cmd.substring(0, 50) + '...' : cmd
+  }
+  const pathMatch = toolParams.match(/(\/?[\w./-]+\.[\w]+)/)
+  if (pathMatch) return pathMatch[1]
+  return toolParams.length > 40 ? toolParams.substring(0, 40) + '...' : toolParams
+}
 
 // ===== AiTurnBlock — 同一 groupId 的 AI 回合统一渲染 =====
 function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
@@ -50,51 +131,11 @@ function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
   const [toolsExpanded, setToolsExpanded] = useState(false)
   const [thinkingExpanded, setThinkingExpanded] = useState(false)
 
-  // ── 工具分类 ──
-  type ToolCategory = 'read' | 'edit' | 'exec' | 'search' | 'other'
-  const categoryMeta: Record<ToolCategory, { icon: string; label: string }> = {
-    read:   { icon: '📄', label: '读取' },
-    edit:   { icon: '✏️', label: '编辑' },
-    exec:   { icon: '💻', label: '执行' },
-    search: { icon: '🔍', label: '搜索' },
-    other:  { icon: '🔧', label: '其他' },
-  }
-  function classifyTool(toolName: string): ToolCategory {
-    const l = toolName.toLowerCase()
-    if (l.includes('read') || l.includes('list') || l.includes('glob') || l.includes('find') || l.includes('cat')) return 'read'
-    if (l.includes('write') || l.includes('edit') || l.includes('create') || l.includes('code') || l.includes('patch') || l.includes('mkdir')) return 'edit'
-    if (l.includes('exec') || l.includes('command') || l.includes('ssh') || l.includes('compile') || l.includes('run') || l.includes('shell') || l.includes('bash')) return 'exec'
-    if (l.includes('search') || l.includes('grep') || l.includes('query') || l.includes('scan')) return 'search'
-    return 'other'
-  }
-  const toolCategories = useMemo(() => {
-    const map = new Map<ToolCategory, AgentMessage[]>()
-    toolCallMsgs.forEach(m => {
-      const cat = classifyTool(m.toolName || '')
-      if (!map.has(cat)) map.set(cat, [])
-      map.get(cat)!.push(m)
-    })
-    return map
-  }, [toolCallMsgs])
-  const categoryOrder: ToolCategory[] = ['read', 'edit', 'exec', 'search', 'other']
-
   const timestamp = msgs[0]?.timestamp || Date.now()
   const turnTime = (() => {
     const d = new Date(timestamp)
     return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   })()
-
-  function extractToolSummary(toolName: string, toolParams?: string): string {
-    if (!toolParams) return toolName
-    const lower = toolName.toLowerCase()
-    if (lower.includes('exec') || lower.includes('command') || lower.includes('ssh')) {
-      const cmd = toolParams.trim().split('\n')[0]
-      return cmd.length > 60 ? cmd.substring(0, 60) + '...' : cmd
-    }
-    const pathMatch = toolParams.match(/(\/?[\w./-]+\.[\w]+)/)
-    if (pathMatch) return pathMatch[1]
-    return toolParams.length > 50 ? toolParams.substring(0, 50) + '...' : toolParams
-  }
 
   // ── 是否处于思考占位状态 ──
   const isPlaceholderThinking = isLoading && thinkingMsgs.length > 0 && thinkingMsgs.every(m => m.content === '思考中...')
@@ -109,27 +150,46 @@ function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
 
   return (
     <div className="space-y-0">
-      {/* ====== 统一机器人头部行 ====== */}
+      {/* 统一头部:头像 + 名称 + 时间 + 所有内容 */}
       <div className="px-4 py-1.5 flex gap-2.5">
-        <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5" style={{ backgroundColor: colors.accent + '20', border: `1px solid ${colors.accent}30` }}>
+        {/* 头像 - 只出现一次 */}
+        <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5"
+             style={{ backgroundColor: colors.accent + '20', border: `1px solid ${colors.accent}30` }}>
           <span className="text-[12px]">🤖</span>
         </div>
         <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1">
+          {/* 名称 + 时间 */}
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] font-semibold" style={{ color: colors.textSecondary }}>WaLiCode</span>
             <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
           </div>
 
-          {/* ── 思考条：占位/重连/断开/实际内容 ── */}
+          {/* 思考占位 - 呼吸点 */}
+          {isPlaceholderThinking && !isReconnecting && !isDisconnected && (
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-md"
+                 style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12` }}>
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '200ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '400ms' }} />
+              </div>
+              <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
+            </div>
+          )}
+
+          {/* 重连状态 */}
           {isPlaceholderThinking && isReconnecting && (
-            <div className="flex items-center gap-2 py-0.5">
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-md"
+                 style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12` }}>
               <span className="text-[13px]" style={{ animation: 'spin 1.5s linear infinite', display: 'inline-block' }}>🔄</span>
               <span className="text-[11px]" style={{ color: '#fbbf24' }}>正在重连...</span>
             </div>
           )}
 
+          {/* 断开状态 */}
           {isPlaceholderThinking && isDisconnected && (
-            <div className="flex items-center gap-2 py-0.5">
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-md"
+                 style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12` }}>
               <span className="text-[13px]">⚠️</span>
               <span className="text-[11px]" style={{ color: '#f87171' }}>连接已中断</span>
               {onRetry && (
@@ -142,34 +202,14 @@ function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
             </div>
           )}
 
-          {isPlaceholderThinking && !isReconnecting && !isDisconnected && (
-            <div
-              className="flex items-center gap-2 px-2.5 py-1 rounded-md"
-              style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12`, animation: 'thinking-pulse 2s ease-in-out infinite' }}
-            >
-              <div className="relative w-12 h-4 overflow-hidden" style={{ flexShrink: 0 }}>
-                <span
-                  className="absolute top-0 text-[13px]"
-                  style={{ animation: 'cat-run 2s infinite ease-in-out', display: 'inline-block' }}
-                >🐱</span>
-                <span
-                  className="absolute bottom-0 text-[5px]"
-                  style={{ color: colors.textDim, animation: 'pawprints 2s infinite ease-in-out', opacity: 0.3 }}
-                >🐾</span>
-              </div>
-              <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
-            </div>
-          )}
-
+          {/* 实际思考内容 - 可折叠 */}
           {hasRealThinking && (
-            <div
-              className="rounded-md px-2.5 py-1.5 cursor-pointer select-none transition-colors"
-              style={{ backgroundColor: colors.bgSecondary + '50', border: `1px solid ${colors.border}20` }}
-              onClick={() => setThinkingExpanded(!thinkingExpanded)}
-            >
+            <div className="rounded-md px-2.5 py-1.5 cursor-pointer select-none transition-colors"
+                 style={{ backgroundColor: colors.bgSecondary + '50', border: `1px solid ${colors.border}20` }}
+                 onClick={() => setThinkingExpanded(!thinkingExpanded)}>
               <div className="flex items-center gap-1.5">
                 <svg className={`w-3 h-3 transition-transform ${thinkingExpanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
-                <span className="text-[11px]" style={{ color: colors.textSecondary }}>💭 思考</span>
+                <span className="text-[11px]" style={{ color: colors.textSecondary }}>思考</span>
                 {!thinkingExpanded && (
                   <span className="text-[10px] truncate max-w-[280px]" style={{ color: colors.textDim }}>
                     {thinkingMsgs.filter(m => m.content !== '思考中...').slice(-1)[0]?.content?.substring(0, 60)}
@@ -188,308 +228,183 @@ function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
             </div>
           )}
 
-          {/* ── 通用加载条：isLoading 但无任何内容区块时显示 ── */}
+          {/* 通用加载条 - 呼吸点 */}
           {showLoadingBar && (
-            <div
-              className="flex items-center gap-2 px-2.5 py-1 rounded-md"
-              style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12`, animation: 'thinking-pulse 2s ease-in-out infinite' }}
-            >
-              <div className="relative w-12 h-4 overflow-hidden" style={{ flexShrink: 0 }}>
-                <span
-                  className="absolute top-0 text-[13px]"
-                  style={{ animation: 'cat-run 2s infinite ease-in-out', display: 'inline-block' }}
-                >🐱</span>
-                <span
-                  className="absolute bottom-0 text-[5px]"
-                  style={{ color: colors.textDim, animation: 'pawprints 2s infinite ease-in-out', opacity: 0.3 }}
-                >🐾</span>
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-md"
+                 style={{ backgroundColor: colors.accent + '08', border: `1px solid ${colors.accent}12` }}>
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '200ms' }} />
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '400ms' }} />
               </div>
-              <span className="text-[11px]" style={{ color: colors.textDim }}>思考中...</span>
+              <span className="text-[11px]" style={{ color: colors.textDim }}>AI 正在分析...</span>
             </div>
           )}
-        </div>
-      </div>
 
-      {/* ====== 工具调用块 — 独立图标+时间（不重复 🤖 头） ====== */}
-      {toolCount > 0 && (
-        <div className="px-4 py-1 flex gap-2.5">
-          <div className="w-7 shrink-0" />
-          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1.5">
-            {/* 进度标签行 */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px]" style={{ color: colors.textSecondary }}>🔧 工具</span>
-              <span
-                className="px-2 py-0.5 rounded-full text-[10px] font-medium"
-                style={{
-                  backgroundColor: allToolDone
-                    ? (failCount > 0 ? '#f8717120' : '#4ade8020')
-                    : colors.accent + '15',
-                  color: allToolDone
-                    ? (failCount > 0 ? '#f87171' : '#4ade80')
-                    : colors.accent,
-                  border: `1px solid ${
-                    allToolDone
-                      ? (failCount > 0 ? '#f8717140' : '#4ade8040')
-                      : colors.accent + '30'
-                  }`,
-                }}
-              >
-                {allToolDone
-                  ? (failCount > 0 ? `${failCount} failed · ${doneCount}/${toolCount}` : `✓ ${doneCount}/${toolCount}`)
-                  : `${doneCount}/${toolCount}`
-                }
-              </span>
-            </div>
+          {/* 工具调用 - 分类聚合展示 */}
+          {toolCount > 0 && (() => {
+            // 分类聚合计算
+            type ToolCategory = { type: ReturnType<typeof classifyTool>; label: string; color: string; bgColor: string; icon: React.ReactNode; msgs: AgentMessage[] }
+            const categoryMap = new Map<ReturnType<typeof classifyTool>, ToolCategory>()
+            for (const m of toolCallMsgs) {
+              const cls = classifyTool(m.toolName || '')
+              const info = getToolIconInfo(m.toolName || '')
+              if (!categoryMap.has(cls)) {
+                categoryMap.set(cls, { type: cls, label: info.label, color: info.color, bgColor: info.bgColor, icon: info.icon, msgs: [] })
+              }
+              categoryMap.get(cls)!.msgs.push(m)
+            }
+            const categories = Array.from(categoryMap.values()).sort((a, b) => b.msgs.length - a.msgs.length)
+            const topCategories = categories.slice(0, 4)
+            const thinkingCount = thinkingMsgs.filter(m => m.content !== '思考中...').length || (thinkingMsgs.length > 0 ? thinkingMsgs.length : 0)
 
-            {/* 分类卡片列表 */}
-            <div className="space-y-1.5">
-              {categoryOrder.filter(c => toolCategories.has(c)).map(cat => {
-                const catMsgs = toolCategories.get(cat)!
-                const meta = categoryMeta[cat]
-                const catDone = catMsgs.filter(m => m.status !== 'in_progress').length
-                const catFail = catMsgs.filter(m => m.status === 'failure').length
-                const catAllDone = catDone === catMsgs.length
+            return (
+              <div className="rounded-lg overflow-hidden" style={{ backgroundColor: allToolDone ? (failCount > 0 ? '#f8717108' : '#4ade8008') : colors.accent + '08', border: `1px solid ${allToolDone ? (failCount > 0 ? '#f8717120' : '#4ade8020') : colors.accent + '20'}` }}>
+                {/* 摘要行 - 始终可见 */}
+                <button className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors hover:bg-black/5 min-w-0"
+                        onClick={() => setToolsExpanded(!toolsExpanded)}>
+                  <span className="text-[11px]">🔧</span>
+                  <span className="text-[11px] font-semibold flex-shrink-0" style={{ color: colors.text }}>{toolCount} 工具</span>
+                  <span className="text-[10px] flex-shrink-0" style={{ color: colors.textSecondary }}>· {msgs.length} 条消息</span>
+                  {/* 完成状态 */}
+                  {allToolDone && (
+                    <span className="text-[10px] flex-shrink-0 font-medium" style={{ color: failCount > 0 ? '#ef4444' : '#22c55e' }}>
+                      ✓ {doneCount}/{toolCount}
+                    </span>
+                  )}
+                  {!allToolDone && (
+                    <span className="text-[10px] flex-shrink-0 animate-pulse" style={{ color: '#f59e0b' }}>● 执行中</span>
+                  )}
+                  {/* 分类标签 - 只显示前3个 */}
+                  {topCategories.slice(0, 3).map(cat => (
+                    <span key={cat.type} className="text-[9px] px-1.5 py-0 rounded-full flex-shrink-0 font-medium whitespace-nowrap" style={{
+                      backgroundColor: `${cat.color}12`,
+                      color: cat.color,
+                      border: `1px solid ${cat.color}25`,
+                    }}>
+                      {cat.label}×{cat.msgs.length}
+                    </span>
+                  ))}
+                  {categories.length > 3 && (
+                    <span className="text-[9px] px-1.5 py-0 rounded-full flex-shrink-0 font-medium whitespace-nowrap" style={{
+                      backgroundColor: `${colors.textDim}12`,
+                      color: colors.textSecondary,
+                      border: `1px solid ${colors.textDim}25`,
+                    }}>
+                      +{categories.length - 3}
+                    </span>
+                  )}
+                  {/* 思考次数 */}
+                  {thinkingCount > 0 && (
+                    <span className="text-[9px] px-1.5 py-0 rounded-full flex-shrink-0 font-medium whitespace-nowrap" style={{
+                      backgroundColor: `${STEP_COLORS.thinking}12`,
+                      color: STEP_COLORS.thinking,
+                      border: `1px solid ${STEP_COLORS.thinking}25`,
+                    }}>
+                      🧠 {thinkingCount}
+                    </span>
+                  )}
+                  {/* 失败标记 */}
+                  {failCount > 0 && (
+                    <span className="text-[10px] text-red-500 flex-shrink-0 font-medium">✗ {failCount}</span>
+                  )}
+                  <div className="flex-1" />
+                  <svg className={`w-3 h-3 transition-transform shrink-0 ${toolsExpanded ? 'rotate-90' : ''}`} style={{ color: colors.textDim }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                </button>
 
-                // 分类专属颜色
-                const catColorMap: Record<ToolCategory, string> = {
-                  read: '#60a5fa',   // 蓝色
-                  edit: '#f59e0b',   // 琥珀色
-                  exec: '#a78bfa',   // 紫色
-                  search: '#34d399', // 翠绿
-                  other: '#94a3b8',  // 灰蓝
-                }
-                const catColor = catColorMap[cat]
-
-                return (
-                  <div
-                    key={cat}
-                    className="rounded-lg overflow-hidden transition-all"
-                    style={{
-                      backgroundColor: catColor + '08',
-                      border: `1px solid ${catColor}25`,
-                    }}
-                  >
-                    {/* 分类标题行 — 始终可见 */}
-                    <div
-                      className="flex items-center gap-2 px-2.5 py-1.5 cursor-pointer select-none"
-                      onClick={() => setToolsExpanded(!toolsExpanded)}
-                    >
-                      {/* 分类图标 */}
-                      <span
-                        className="w-5 h-5 rounded flex items-center justify-center text-[12px] shrink-0"
-                        style={{ backgroundColor: catColor + '20' }}
-                      >
-                        {meta.icon}
-                      </span>
-
-                      {/* 分类名称 */}
-                      <span className="text-[11px] font-semibold" style={{ color: catColor }}>{meta.label}</span>
-
-                      {/* 数量标签 */}
-                      <span
-                        className="px-1.5 py-0 rounded text-[9px] font-bold tabular-nums"
-                        style={{ backgroundColor: catColor + '15', color: catColor }}
-                      >
-                        {catMsgs.length}
-                      </span>
-
-                      {/* 进度点 */}
-                      <div className="flex items-center gap-0.5">
-                        {catMsgs.slice(0, 8).map((m, i) => {
-                          const dotColor = m.status === 'success' ? '#4ade80' : m.status === 'failure' ? '#f87171' : catColor
-                          return (
-                            <span
-                              key={i}
-                              className="inline-block rounded-full"
-                              style={{ width: 4, height: 4, backgroundColor: dotColor }}
-                            />
-                          )
-                        })}
-                        {catMsgs.length > 8 && (
-                          <span className="text-[9px]" style={{ color: colors.textDim }}>+{catMsgs.length - 8}</span>
-                        )}
-                      </div>
-
-                      {/* 分类状态标签 */}
-                      <span
-                        className="ml-auto px-1.5 py-0 rounded text-[9px] font-medium"
-                        style={{
-                          backgroundColor: catAllDone
-                            ? (catFail > 0 ? '#f8717115' : '#4ade8015')
-                            : catColor + '15',
-                          color: catAllDone
-                            ? (catFail > 0 ? '#f87171' : '#4ade80')
-                            : catColor,
-                        }}
-                      >
-                        {catAllDone
-                          ? (catFail > 0 ? `${catFail} failed` : '✓')
-                          : `${catDone}/${catMsgs.length}`
-                        }
-                      </span>
-
-                      {/* 展开/收起箭头 */}
-                      <svg
-                        className={`w-3 h-3 shrink-0 transition-transform ${toolsExpanded ? 'rotate-90' : ''}`}
-                        style={{ color: colors.textDim }}
-                        viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                      >
-                        <polyline points="6 9 12 15 18 9" />
-                      </svg>
-                    </div>
-
-                    {/* 展开态：工具条目详情 */}
-                    {toolsExpanded && (
-                      <div className="px-2.5 pb-2 space-y-0.5" style={{ borderTop: `1px solid ${catColor}15` }}>
-                        {catMsgs.map(m => {
-                          const summary = extractToolSummary(m.toolName || '', m.toolParams)
-                          const dotColor = m.status === 'success' ? '#4ade80' : m.status === 'failure' ? '#f87171' : catColor
-                          return (
-                            <div key={m.id} className="flex items-center gap-2 py-1">
-                              <span
-                                className="shrink-0 rounded-full"
-                                style={{ width: 5, height: 5, backgroundColor: dotColor }}
-                              />
-                              <span className="text-[11px] font-mono truncate" style={{ color: colors.text }}>{summary}</span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )}
+                {/* 展开后: 按分类聚合的工具卡片列表 */}
+                {toolsExpanded && (
+                  <div className="px-2 pb-2 space-y-1.5" style={{ borderTop: `1px solid ${colors.border}15` }}>
+                    {/* 按分类聚合的工具卡片 */}
+                    {categories.map(cat => (
+                      <SidebarToolCategory key={cat.type} category={cat} colors={colors} />
+                    ))}
                   </div>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ====== 错误消息 — 图标+时间（不重复 🤖 头） ====== */}
-      {errorMsgs.length > 0 && (
-        <div className="px-4 py-1 flex gap-2.5">
-          <div className="w-7 shrink-0" />
-          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px]" style={{ color: colors.red }}>⚠️ 错误</span>
-              <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
-            </div>
-            {errorMsgs.map(m => (
-              <div key={m.id} className="px-3 py-2 text-[12px] leading-relaxed rounded-lg" style={{ backgroundColor: `${colors.red}10`, color: colors.red, border: `1px solid ${colors.red}25` }}>
-                {m.content}
+                )}
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            )
+          })()}
 
-      {/* ====== AI 文本回复 — 独立机器人头部 ====== */}
-      {textMsgs.length > 0 && (
-        <div className="px-4 py-1.5 flex gap-2.5">
-          <div className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 mt-0.5" style={{ backgroundColor: colors.accent + '20', border: `1px solid ${colors.accent}30` }}>
-            <span className="text-[12px]">🤖</span>
-          </div>
-          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)] gap-1">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-semibold" style={{ color: colors.textSecondary }}>WaLiCode</span>
-              <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
+          {/* 错误消息 - 无重复头像 */}
+          {errorMsgs.length > 0 && (
+            <div className="space-y-1">
+              {errorMsgs.map(m => (
+                <div key={m.id} className="px-3 py-2 text-[12px] leading-relaxed rounded-lg"
+                     style={{ backgroundColor: `${colors.red}10`, color: colors.red, border: `1px solid ${colors.red}25` }}>
+                  {m.content}
+                </div>
+              ))}
             </div>
+          )}
+
+          {/* AI 文本回复 - 无重复头像,直接嵌入 */}
+          {textMsgs.length > 0 && (
             <div className="text-[13px] leading-relaxed overflow-hidden min-w-0">
               {textMsgs.map(m => {
                 const contentParts = m.content ? splitThinkTags(m.content) : []
                 return (
                   <div key={m.id}>
-                    {contentParts.length > 0 ? (
-                      contentParts.map((part, idx) => {
-                        if (part.type === 'think') return <ThinkingBlock key={idx} content={part.content} isStreaming={part.isStreaming || false} />
-                        if (!part.content.trim()) return null
-                        if (isLoading && part.isStreaming) {
-                          return <TypewriterRenderer key={idx} fullText={part.content} isLoading={isLoading} renderContent={(text) => <MarkdownContent content={text} colors={colors} />} />
-                        }
-                        return <MarkdownContent key={idx} content={part.content} colors={colors} />
-                      })
-                    ) : (
+                    {contentParts.length > 0 ? contentParts.map((part, idx) => {
+                      if (part.type === 'think') return <ThinkingBlock key={idx} content={part.content} isStreaming={part.isStreaming || false} />
+                      if (!part.content.trim()) return null
+                      if (isLoading && part.isStreaming) {
+                        return <TypewriterRenderer key={idx} fullText={part.content} isLoading={isLoading} renderContent={(text) => <MarkdownContent content={text} colors={colors} />} />
+                      }
+                      return <MarkdownContent key={idx} content={part.content} colors={colors} />
+                    }) : (
                       <div className="flex items-center gap-1.5 py-0.5">
-                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse 1.5s ease-in-out infinite' }} />
+                        <div className="w-2 h-2 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite' }} />
                       </div>
                     )}
                   </div>
                 )
               })}
             </div>
-          </div>
-        </div>
-      )}
+          )}
 
-      {/* ====== AI 继续工作中指示器 — 文本块后，提示用户 AI 还在工作 ====== */}
-      {isLoading && textMsgs.length > 0 && (() => {
-        // 优先判断：是否有正在进行中的工具
-        const hasInProgressTool = msgs.some(m => m.messageType === 'tool_call' && m.status === 'in_progress')
-        const label = hasInProgressTool ? 'AI 正在调用工具...' : 'AI 正在分析...'
-        return (
-          <div className="px-4 py-1 flex gap-2.5">
-            <div className="w-7 shrink-0" />
-            <div
-              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md"
-              style={{ backgroundColor: colors.accent + '06', border: `1px solid ${colors.accent}10` }}
-            >
-              {/* 三个跳动圆点 */}
-              <div className="flex items-center gap-0.5">
-                <span
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: colors.accent, animation: 'bounce-dot 1.2s ease-in-out infinite', animationDelay: '0ms' }}
-                />
-                <span
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: colors.accent, animation: 'bounce-dot 1.2s ease-in-out infinite', animationDelay: '200ms' }}
-                />
-                <span
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: colors.accent, animation: 'bounce-dot 1.2s ease-in-out infinite', animationDelay: '400ms' }}
-                />
+          {/* "AI 继续工作"指示器 - 简化为呼吸点 */}
+          {isLoading && textMsgs.length > 0 && (() => {
+            const hasInProgressTool = msgs.some(m => m.messageType === 'tool_call' && m.status === 'in_progress')
+            const label = hasInProgressTool ? 'AI 正在调用工具...' : 'AI 正在分析...'
+            return (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md"
+                   style={{ backgroundColor: colors.accent + '06', border: `1px solid ${colors.accent}10` }}>
+                <div className="flex items-center gap-0.5">
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '200ms' }} />
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: colors.accent, animation: 'pulse-dot 1.4s ease-in-out infinite', animationDelay: '400ms' }} />
+                </div>
+                <span className="text-[10px]" style={{ color: colors.textDim }}>{label}</span>
               </div>
-              <span className="text-[10px]" style={{ color: colors.textDim }}>{label}</span>
-            </div>
-          </div>
-        )
-      })()}
+            )
+          })()}
 
-      {/* ====== 摘要（跟随文本块）—— 图标+时间，不重复 🤖 头 ====== */}
-      {summaryMsgs.length > 0 && (
-        <div className="px-4 py-0.5 flex gap-2.5">
-          <div className="w-7 shrink-0" />
-          <div className="flex flex-col min-w-0 flex-1 max-w-[calc(100%-36px)]">
-            <div className="flex items-center gap-1.5 mb-1">
-              <span className="text-[11px]" style={{ color: colors.textSecondary }}>📋 变更摘要</span>
-              <span className="text-[10px]" style={{ color: colors.textDim }}>{turnTime}</span>
+          {/* 变更摘要 - 无重复头像 */}
+          {summaryMsgs.length > 0 && (
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px]" style={{ color: colors.textSecondary }}>📋 变更摘要</span>
+              </div>
+              {summaryMsgs.map(m => m.changeSummary ? <SessionSummaryCard key={m.id} summary={m.changeSummary} /> : null)}
             </div>
-            {summaryMsgs.map(m => (
-              m.changeSummary ? <SessionSummaryCard key={m.id} summary={m.changeSummary} /> : null
-            ))}
-          </div>
+          )}
         </div>
-      )}
+      </div>
 
-      {/* ====== 中断/错误状态提示 ====== */}
+      {/* 中断/错误状态提示 */}
       {!isLoading && errorMsgs.length > 0 && (
         <div className="px-4 py-1.5 flex gap-2.5">
           <div className="w-7 shrink-0" />
-          <div
-            className="flex items-center gap-2 px-3 py-2 rounded-lg"
-            style={{
-              backgroundColor: 'rgba(239, 68, 68, 0.08)',
-              border: '1px solid rgba(239, 68, 68, 0.2)',
-            }}
-          >
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg"
+               style={{ backgroundColor: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
             <span className="text-[13px]">⚠️</span>
             <span className="text-[11px]" style={{ color: '#f87171' }}>
               {errorMsgs[errorMsgs.length - 1]?.content || '对话已中断'}
             </span>
             {onRetry && (
-              <button
-                className="px-2.5 py-0.5 rounded text-[10px] font-medium transition-all hover:opacity-80"
-                style={{ backgroundColor: colors.accent, color: '#fff' }}
-                onClick={onRetry}
-              >
+              <button className="px-2.5 py-0.5 rounded text-[10px] font-medium transition-all hover:opacity-80"
+                      style={{ backgroundColor: colors.accent, color: '#fff' }}
+                      onClick={onRetry}>
                 ▶ 继续对话
               </button>
             )}
