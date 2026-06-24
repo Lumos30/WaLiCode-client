@@ -281,6 +281,10 @@ export function normalizeMarkdown(text: string): string {
     return '|' + cells.join('|') + '|'
   })
 
+  // 单行长文本拆分：按中文句末标点（。！？）或英文句末标点（.!?）后跟中文/大写字母 → 插入换行
+  // 这处理 LLM 输出整段无换行的情况（后端 MarkdownNormalizer 的前端兜底）
+  result = result.replace(/([。！？!?])([\u4e00-\u9fa5A-Z])/g, '$1\n\n$2')
+
   // 普通文本行之间的单换行 → 双换行（段落分隔）
   // 条件：前一行和后一行都不是列表、标题、代码、表格等 Markdown 元素
   const isSpecialLine = (line: string) =>

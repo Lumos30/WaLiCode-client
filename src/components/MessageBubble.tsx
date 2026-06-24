@@ -173,6 +173,10 @@ function normalizeMarkdown(text: string): string {
     return '|' + cells.join('|') + '|'
   })
 
+  // ══════ Phase 4.5: 单行长文本拆分 ══════
+  // 按中文句末标点（。！？）或英文句末标点（.!?）后跟中文/大写字母 → 插入换行
+  result = result.replace(/([。！？!?])([\u4e00-\u9fa5A-Z])/g, '$1\n\n$2')
+
   // ══════ Phase 5: 清理 ══════
   result = result.replace(/\n{3,}/g, '\n\n')
 
