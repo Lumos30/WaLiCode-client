@@ -179,8 +179,6 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
   const totalDeleted = summary.deleted?.length || 0
   const totalFiles = totalCreated + totalModified + totalDeleted
 
-  if (totalFiles === 0) return null
-
   const allFiles = [
     ...(summary.created || []).map(f => ({ ...f, kind: 'create' as const })),
     ...(summary.modified || []).map(f => ({ ...f, kind: 'modify' as const })),
@@ -188,11 +186,13 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
   ]
 
   // 计算待处理文件数（未 accepted/reverted 且有 preview 的）
-  const pendingCount = allFiles.filter(f => !fileStatuses[f.path] || fileStatuses[f.path] === 'pending').length
+  const pendingCount = totalFiles === 0 ? 0 : allFiles.filter(f => !fileStatuses[f.path] || fileStatuses[f.path] === 'pending').length
   const processedCount = totalFiles - pendingCount
 
+  // ⚠️ Hook 规则：useCallback 必须在条件 return 之前调用
   // Accept All
   const handleAcceptAll = useCallback(async () => {
+    if (totalFiles === 0) return
     setBulkProcessing(true)
     try {
       for (const file of allFiles) {
@@ -205,10 +205,11 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
     } finally {
       setBulkProcessing(false)
     }
-  }, [allFiles, previews, removePreview, fileStatuses])
+  }, [totalFiles, allFiles, previews, removePreview, fileStatuses])
 
   // Revert All
   const handleRevertAll = useCallback(async () => {
+    if (totalFiles === 0) return
     setBulkProcessing(true)
     try {
       const localStore = useLocalFileStore.getState()
@@ -234,11 +235,15 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
     } finally {
       setBulkProcessing(false)
     }
-  }, [allFiles, previews, removePreview, fileStatuses])
+  }, [totalFiles, allFiles, previews, removePreview, fileStatuses])
 
   const handleFileStatusChange = useCallback((path: string, status: FileStatus) => {
     setFileStatuses(prev => ({ ...prev, [path]: status }))
   }, [])
+
+  // ⚠️ Hook 规则：所有 Hook 必须在条件 return 之前调用
+  // totalFiles 为 0 时返回 null，但 Hook 数量必须与上一次渲染一致
+  if (totalFiles === 0) return null
 
   // 全部已处理 → 简化显示
   const allProcessed = pendingCount === 0 && processedCount > 0

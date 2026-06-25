@@ -359,8 +359,6 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
 
   // ⚠️ Hook 规则：所有 Hook 必须在条件 return 之前调用
   // processSteps 为空时直接返回 null，但 Hook 数量必须与上一次渲染一致
-  if (processSteps.length === 0) return null
-
   const toolSteps = processSteps.filter(s => s.stepType === 'tool_call')
   const thinkingSteps = processSteps.filter(s => s.stepType === 'thinking')
   const toolCount = toolSteps.length
@@ -377,28 +375,16 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
   // 紧凑模式：完成态 >6 步骤
   const useCompactMode = expandMode === 'compact' || (!isStreaming && !isLoading && allDone && processSteps.length > 6 && expandMode === 'expanded')
 
-  // 折叠状态摘要
-  // collapsedSummary 保留用于未来扩展（如 tooltip）
-  // const collapsedSummary = buildCollapsedSummary(toolGroups)
-
-  // 文件变更数量已移至 ArtifactSummaryPanel 展示，此处不再需要
-  // const allPreviews = useAiPatchStore(s => s.previews)
-  // const relatedPreviewCount = useMemo(() => { ... }, [toolGroups, allPreviews])
-
   // 筛选后的步骤（仅显示失败时）
   const filteredToolGroups = showFailuresOnly
     ? toolGroups.map(g => ({ ...g, steps: g.steps.filter(s => s.status === 'failure') })).filter(g => g.steps.length > 0)
     : toolGroups
   const filteredThinkingSteps = showFailuresOnly ? [] : thinkingSteps
 
-  // 循环切换展开模式：collapsed → compact → expanded → collapsed
-  const cycleExpandMode = () => {
-    userToggledRef.current = true
-    setExpandMode(prev => prev === 'collapsed' ? 'compact' : prev === 'compact' ? 'expanded' : 'collapsed')
-  }
-
+  // ⚠️ Hook 规则：useMemo 必须在条件 return 之前调用
   // ===== 工具分类汇总（用于 collapsed/compact 摘要头）=====
   const toolCategorySummary = useMemo(() => {
+    if (processSteps.length === 0) return []
     const catMap = new Map<ReturnType<typeof classifyTool>, { label: string; color: string; count: number }>()
     for (const group of toolGroups) {
       const type = classifyTool(group.toolName)
@@ -413,10 +399,11 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     return Array.from(catMap.entries())
       .sort((a, b) => b[1].count - a[1].count)
       .map(([type, info]) => ({ type, ...info }))
-  }, [toolGroups])
+  }, [toolGroups, processSteps])
 
   // ===== 按分类聚合工具组（expanded 模式使用）=====
   const categorizedToolGroups = useMemo(() => {
+    if (processSteps.length === 0) return []
     const catMap = new Map<ReturnType<typeof classifyTool>, { label: string; color: string; bgColor: string; icon: React.ReactNode; groups: ToolGroup[]; totalSteps: number; successCount: number; failCount: number }>()
     for (const group of filteredToolGroups) {
       const type = classifyTool(group.toolName)
@@ -443,7 +430,17 @@ function ProcessTimeline({ steps, colors, isStreaming, isLoading }: {
     return Array.from(catMap.entries())
       .sort((a, b) => b[1].totalSteps - a[1].totalSteps)
       .map(([type, info]) => ({ type, ...info }))
-  }, [filteredToolGroups])
+  }, [filteredToolGroups, processSteps])
+
+  // ⚠️ Hook 规则：所有 Hook 必须在条件 return 之前调用
+  // processSteps 为空时直接返回 null，但 Hook 数量必须与上一次渲染一致
+  if (processSteps.length === 0) return null
+
+  // 循环切换展开模式：collapsed → compact → expanded → collapsed
+  const cycleExpandMode = () => {
+    userToggledRef.current = true
+    setExpandMode(prev => prev === 'collapsed' ? 'compact' : prev === 'compact' ? 'expanded' : 'collapsed')
+  }
 
   // ===== Cursor / Android 风格摘要行（collapsed + compact）=====
   const isCollapsedOrCompact = expandMode === 'collapsed' || expandMode === 'compact'

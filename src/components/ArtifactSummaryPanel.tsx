@@ -215,13 +215,10 @@ export const ArtifactSummaryPanel = memo(function ArtifactSummaryPanel() {
   // 只显示 pending 状态的预览（已 accepted/reverted 的不在此面板处理，由子组件自己管）
   const pendingPreviews = previews
 
-  if (pendingPreviews.length === 0) return null
-
-  const totalAdded = pendingPreviews.reduce((s, p) => s + p.addedLines, 0)
-  const totalRemoved = pendingPreviews.reduce((s, p) => s + p.removedLines, 0)
-
+  // ⚠️ Hook 规则：useCallback 必须在条件 return 之前调用
   // 全部接受
   const handleAcceptAll = useCallback(() => {
+    if (pendingPreviews.length === 0) return
     for (const p of pendingPreviews) {
       removePreview(p.id)
     }
@@ -229,6 +226,7 @@ export const ArtifactSummaryPanel = memo(function ArtifactSummaryPanel() {
 
   // 全部回退
   const handleRevertAll = useCallback(async () => {
+    if (pendingPreviews.length === 0) return
     for (const p of pendingPreviews) {
       try {
         if (p.target === 'local') {
@@ -242,6 +240,13 @@ export const ArtifactSummaryPanel = memo(function ArtifactSummaryPanel() {
       }
     }
   }, [pendingPreviews, removePreview])
+
+  // ⚠️ Hook 规则：所有 Hook 必须在条件 return 之前调用
+  // pendingPreviews 为空时返回 null，但 Hook 数量必须与上一次渲染一致
+  if (pendingPreviews.length === 0) return null
+
+  const totalAdded = pendingPreviews.reduce((s, p) => s + p.addedLines, 0)
+  const totalRemoved = pendingPreviews.reduce((s, p) => s + p.removedLines, 0)
 
   return (
     <div
