@@ -66,6 +66,10 @@ function dtoToConnection(dto: SshConnectionDTO): SSHConnection {
 }
 
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+/** 连续失败次数（用于指数退避） */
+let heartbeatFailCount = 0
+/** 下次心跳时间戳 */
+let nextHeartbeatAt = 0
 
 export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   connections: [],
@@ -213,11 +217,17 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
   startHeartbeat: () => {
     if (heartbeatTimer) return // 已启动
 
+    // 使用 3s 轮询间隔，内部根据退避策略决定是否执行实际请求
     heartbeatTimer = setInterval(async () => {
+      const now = Date.now()
+      // 指数退避：未到下次心跳时间则跳过
+      if (now < nextHeartbeatAt) return
+
       const state = get()
       const activeConns = state.connections.filter((c) => c.status === ConnectionStatus.CONNECTED)
       if (activeConns.length === 0) return
 
+      let anyFailed = false
       for (const conn of activeConns) {
         try {
           const res = await sshApi.getConnection(conn.id)
@@ -231,7 +241,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
             }
           }
         } catch {
-          // 网络异常：标记为失败（红色），表示后端服务不可达
+          anyFailed = true
           set((s) => ({
             connections: s.connections.map((c) =>
               c.id === conn.id ? { ...c, status: ConnectionStatus.FAILED } : c
@@ -239,7 +249,19 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
           }))
         }
       }
-    }, 10000)
+
+      // 指数退避：失败时增大间隔，成功时重置
+      if (anyFailed) {
+        heartbeatFailCount++
+        // 退避间隔：10s, 20s, 40s, 80s...最大 5 分钟
+        const backoffMs = Math.min(10_000 * Math.pow(2, heartbeatFailCount - 1), 300_000)
+        nextHeartbeatAt = now + backoffMs
+        console.warn(`[Heartbeat] 连续失败 ${heartbeatFailCount} 次，下次心跳 ${backoffMs / 1000}s 后`)
+      } else {
+        heartbeatFailCount = 0
+        nextHeartbeatAt = now + 10_000 // 正常间隔 10s
+      }
+    }, 3_000) // 轮询间隔 3s（实际执行频率由退避策略控制）
   },
 
   stopHeartbeat: () => {
@@ -247,5 +269,7 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
       clearInterval(heartbeatTimer)
       heartbeatTimer = null
     }
+    heartbeatFailCount = 0
+    nextHeartbeatAt = 0
   },
 }))

@@ -607,11 +607,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       // 仅在 streaming/reconnecting 状态下检测心跳超时
       if ((store.status === 'streaming' || store.status === 'reconnecting') && store.isHeartbeatStale()) {
         console.warn('[SSE] heartbeat stale, stream may be dead')
-        // 触发断开，agent.ts 的 catch 会自动重连
+        // 中断当前 fetch，让 agent.ts 的 catch 处理重连
         if (abortRef.current) {
-          // 不设置 isAborted，只中断当前 fetch 让 catch 处理重连
-          // 但 abortRef 调用会设 isAborted=true...
-          // 所以这里改为直接触发错误状态
+          abortRef.current()
+          abortRef.current = null
+          // 设置重连状态，让 agent.ts 的重试逻辑接管
+          store.setRetrying(store.retryCount + 1)
+          setLoading(true)
         }
         // 如果已经在 reconnecting 且超过最大重试，显示错误
         if (store.status === 'reconnecting' && store.retryCount >= store.maxRetries) {
