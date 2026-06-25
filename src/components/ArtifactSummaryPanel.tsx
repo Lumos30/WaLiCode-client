@@ -24,6 +24,8 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
   const [status, setStatus] = useState<'pending' | 'accepted' | 'reverted'>('pending')
   const [reverting, setReverting] = useState(false)
   const removePreview = useAiPatchStore(s => s.removePreview)
+  const openDiffTabRemote = useFileExplorerStore(s => s.openDiffTab)
+  const openDiffTabLocal = useLocalFileStore(s => s.openDiffTab)
 
   const sep = preview.path.lastIndexOf('/')
   const fileName = sep >= 0 ? preview.path.substring(sep + 1) : preview.path
@@ -101,7 +103,15 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
       {/* 文件行 */}
       <div
         className="flex items-center gap-2 px-3 py-1.5 cursor-pointer transition-colors hover:bg-black/5"
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => {
+          // 根据 target 选择正确的 store：local → localFileStore，remote → fileExplorerStore
+          if (preview.target === 'local') {
+            openDiffTabLocal(preview.id)
+          } else {
+            openDiffTabRemote(preview.id)
+          }
+        }}
+        title="查看 Diff 对比"
       >
         <span className="text-xs flex-shrink-0">{fileIcon}</span>
         <div className="flex flex-col min-w-0 flex-1">
@@ -152,10 +162,24 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
         >
           ✕
         </button>
+        {/* Diff 对比按钮 */}
+        <button
+          onClick={(e) => { e.stopPropagation(); if (preview.target === 'local') { openDiffTabLocal(preview.id) } else { openDiffTabRemote(preview.id) } }}
+          className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all hover:opacity-80 flex-shrink-0"
+          style={{
+            backgroundColor: `${colors.accent}10`,
+            color: colors.accent,
+            border: `1px solid ${colors.accent}20`,
+          }}
+          title="查看 Diff 对比"
+        >
+          🔀
+        </button>
         <svg
           className={`w-3 h-3 transition-transform flex-shrink-0 ${expanded ? 'rotate-180' : ''}`}
           style={{ color: colors.textDim }}
           viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded) }}
         >
           <polyline points="6 9 12 15 18 9" />
         </svg>

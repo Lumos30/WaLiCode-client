@@ -6,6 +6,7 @@ import {
   writeTextFile,
   type DirEntry,
 } from '@tauri-apps/plugin-fs'
+import { useAiPatchStore } from './aiPatchStore'
 
 /** 本地文件节点 */
 export interface LocalFileNode {
@@ -30,6 +31,32 @@ export interface LocalOpenTab {
   language: string
   /** 每次外部（AI）重载内容时递增，用于强制 Monaco Editor 刷新 */
   contentVersion?: number
+}
+
+/** Diff 标签页：用于在编辑器中对比 AI 修改前后的内容（本地文件） */
+export interface LocalDiffTab {
+  key: string
+  /** 标记为 diff 类型 */
+  kind: 'diff'
+  /** 关联的 AiPatchPreview id */
+  previewId: string
+  path: string
+  name: string
+  language: string
+  /** 修改前的原始内容 */
+  beforeContent: string
+  /** 修改后的内容 */
+  afterContent: string
+  /** 新增行数 */
+  addedLines: number
+  /** 删除行数 */
+  removedLines: number
+}
+
+export type LocalAnyTab = LocalOpenTab | LocalDiffTab
+
+export function isLocalDiffTab(tab: LocalAnyTab | null | undefined): tab is LocalDiffTab {
+  return !!tab && (tab as LocalDiffTab).kind === 'diff'
 }
 
 /** 根据扩展名推断语言 */
@@ -145,7 +172,7 @@ interface LocalFileStore {
   loading: boolean
   error: string | null
 
-  openTabs: LocalOpenTab[]
+  openTabs: LocalAnyTab[]
   activeTabKey: string | null
 
   openFolder: () => Promise<void>
@@ -164,11 +191,19 @@ interface LocalFileStore {
   reloadActiveFile: () => Promise<void>
   /** 按文件路径重载指定标签内容，返回重载后的文本 */
   reloadFileByPath: (path: string) => Promise<string | null>
+  /** 读取文件内容（不打开 tab），用于 AI 变更后获取 afterContent */
+  readFileContent: (path: string) => Promise<string | null>
   /** 按文件路径恢复指定内容，并落盘保存 */
   restoreFileContent: (path: string, content: string) => Promise<boolean>
   setSelectedPath: (path: string | null) => void
   closeFolder: () => void
   restoreFolder: () => Promise<boolean>
+  /** 打开本地文件的 Diff 标签页 */
+  openDiffTab: (previewId: string) => void
+  /** 关闭本地文件的 Diff 标签页 */
+  closeDiffTab: (previewId: string) => void
+  /** 展开文件树到指定路径的目录（确保文件在树中可见） */
+  expandPathTo: (filePath: string) => Promise<void>
 }
 
 const STORAGE_KEY = 'walicode-local-folder'
@@ -373,7 +408,10 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
     const key = path
     const existing = get().openTabs.find((t) => t.key === key)
     if (existing) {
-      get().setActiveTab(key)
+      // 文件已打开：激活 tab 并定位到文件树
+      set({ activeTabKey: key, selectedPath: path })
+      // 展开文件树到文件所在目录
+      await get().expandPathTo(path)
       return
     }
 
@@ -393,6 +431,8 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       activeTabKey: key,
       selectedPath: path,
     }))
+    // 展开文件树到文件所在目录
+    await get().expandPathTo(path)
 
     try {
       const content = await readTextFile(path)
@@ -414,7 +454,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
   updateFileContent: (key, content) => {
     set((state) => ({
       openTabs: state.openTabs.map((t) =>
-        t.key === key && t.content !== content
+        !isLocalDiffTab(t) && t.key === key && t.content !== content
           ? { ...t, content, modified: true }
           : t
       ),
@@ -422,7 +462,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
   },
 
   saveFile: async (key: string) => {
-    const tab = get().openTabs.find((t) => t.key === key)
+    const tab = get().openTabs.find((t) => !isLocalDiffTab(t) && t.key === key) as LocalOpenTab | undefined
     if (!tab) return false
 
     try {
@@ -483,7 +523,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       const content = await readTextFile(tab.path)
       set((state) => ({
         openTabs: state.openTabs.map((t) =>
-          t.key === activeTabKey ? { ...t, content, loading: false, modified: false, contentVersion: (t.contentVersion ?? 0) + 1 } : t
+          t.key === activeTabKey ? { ...t, content, loading: false, modified: false, contentVersion: ((t as LocalOpenTab).contentVersion ?? 0) + 1 } : t
         ),
       }))
     } catch (err: any) {
@@ -498,12 +538,22 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       const content = await readTextFile(path)
       set((state) => ({
         openTabs: state.openTabs.map((t) =>
-          t.path === path ? { ...t, content, loading: false, modified: false, error: undefined, contentVersion: (t.contentVersion ?? 0) + 1 } : t
+          t.path === path ? { ...t, content, loading: false, modified: false, error: undefined, contentVersion: ((t as LocalOpenTab).contentVersion ?? 0) + 1 } : t
         ),
       }))
       return content
     } catch (err: any) {
       console.error('[localFileStore] reloadFileByPath error:', path, err)
+      return null
+    }
+  },
+
+  readFileContent: async (path: string) => {
+    try {
+      const content = await readTextFile(path)
+      return content
+    } catch (err: any) {
+      console.error('[localFileStore] readFileContent error:', path, err)
       return null
     }
   },
@@ -561,6 +611,77 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       clearSavedFolder()
       set({ loading: false, error: null })
       return false
+    }
+  },
+
+  /** 打开本地文件 Diff 标签页：通过 AiPatchPreview id 查找 preview，创建 LocalDiffTab */
+  openDiffTab: (previewId) => {
+    const preview = useAiPatchStore.getState().previews.find(p => p.id === previewId)
+    if (!preview) return
+
+    const key = `diff:${previewId}`
+    const existing = get().openTabs.find(t => t.key === key)
+    if (existing) {
+      get().setActiveTab(key)
+      return
+    }
+
+    const sep = preview.path.lastIndexOf('/')
+    const name = sep >= 0 ? preview.path.substring(sep + 1) : preview.path
+    const language = getLanguage(name)
+
+    const newTab: LocalDiffTab = {
+      kind: 'diff',
+      key,
+      previewId: preview.id,
+      path: preview.path,
+      name,
+      language,
+      beforeContent: preview.beforeContent,
+      afterContent: preview.afterContent,
+      addedLines: preview.addedLines,
+      removedLines: preview.removedLines,
+    }
+
+    set((state) => ({ openTabs: [...state.openTabs, newTab] }))
+    get().setActiveTab(key)
+  },
+
+  /** 关闭本地文件 Diff 标签页 */
+  closeDiffTab: (previewId) => {
+    const key = `diff:${previewId}`
+    get().closeTab(key)
+  },
+
+  /** 展开文件树到指定路径的目录层级（确保文件在树中可见并被选中） */
+  expandPathTo: async (filePath: string) => {
+    const { rootPath, expandedPaths } = get()
+    if (!rootPath) return
+
+    // 从根目录开始，逐级展开到文件所在目录
+    const normalized = filePath.replace(/\\/g, '/')
+    const segments = normalized.replace(rootPath + '/', '').replace(rootPath, '').split('/').filter(Boolean)
+    // 文件名在最后，目录路径是除最后一段以外的全部
+    const dirSegments = segments.slice(0, -1)
+
+    const newExpanded = new Set(expandedPaths)
+    let currentPath = rootPath
+    let needsTreeUpdate = false
+
+    for (const seg of dirSegments) {
+      currentPath = joinPath(currentPath, seg)
+      if (!newExpanded.has(currentPath)) {
+        newExpanded.add(currentPath)
+        needsTreeUpdate = true
+        // 确保该目录已加载子节点
+        await get().expandDirectory(currentPath)
+      }
+    }
+
+    if (needsTreeUpdate) {
+      set({ expandedPaths: newExpanded, selectedPath: filePath })
+    } else {
+      set({ selectedPath: filePath })
     }
   },
 }))

@@ -145,6 +145,35 @@ export function MainView() {
     setActiveTerminalSessionId(sessionId)
   }, [])
 
+  // 监听 fileExplorerStore.activeTabKey 变化：当远程文件/diff tab 被激活时，自动切换到 files 标签页并显示文件视图
+  // 注意：使用 ref 避免与 localFileStore 的 activeTabKey 变化产生竞争
+  const prevActiveTabKeyRef = useRef<string | null>(activeTabKey)
+  useEffect(() => {
+    // 只有 activeTabKey 真正变化时才切换（避免与 local 标签页的切换产生竞争）
+    if (activeTabKey && activeTabKey !== prevActiveTabKeyRef.current) {
+      prevActiveTabKeyRef.current = activeTabKey
+      setIsTerminalActive(false)
+      // 远程文件 tab 或 diff tab → 确保 activeTab 为 'files'
+      if (activeTab !== 'files') {
+        setActiveTab('files')
+      }
+    }
+  }, [activeTabKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 监听 localFileStore.activeTabKey 变化：当本地文件 tab 被激活时，自动切换到 local 标签页
+  // 注意：使用 ref 避免与 fileExplorerStore 的 activeTabKey 变化产生竞争
+  const localActiveTabKey = useLocalFileStore((s) => s.activeTabKey)
+  const prevLocalActiveTabKeyRef = useRef<string | null>(localActiveTabKey)
+  useEffect(() => {
+    // 只有 localActiveTabKey 真正变化时才切换（避免与 files 标签页的切换产生竞争）
+    if (localActiveTabKey && localActiveTabKey !== prevLocalActiveTabKeyRef.current) {
+      prevLocalActiveTabKeyRef.current = localActiveTabKey
+      if (activeTab !== 'local') {
+        setActiveTab('local')
+      }
+    }
+  }, [localActiveTabKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // 处理终端大小调整
   const handleTerminalResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -377,6 +406,7 @@ export function MainView() {
                   >
                     {openTabs.map((tab) => {
                       const isActive = activeTabKey === tab.key
+                      const isDiff = 'kind' in tab && tab.kind === 'diff'
                       return (
                         <button
                           key={tab.key}
@@ -400,6 +430,7 @@ export function MainView() {
                             border: `1px solid ${isActive ? colors.border : 'transparent'}`,
                           }}
                         >
+                          {isDiff && <span className="text-[10px] flex-shrink-0" title="Diff 对比">🔀</span>}
                           <span className="truncate">{tab.name}</span>
                           <span
                             onClick={(e) => {

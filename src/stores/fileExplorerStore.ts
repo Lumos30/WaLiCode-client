@@ -1,5 +1,21 @@
 import { create } from 'zustand'
 import { getFileContent, getFileTree, saveFileContent, getFileContentChunk } from '../api/sshFile'
+import { useAiPatchStore } from './aiPatchStore'
+
+/** 轻量级语言推断（仅用于 Diff Tab，Monaco 不识别时会自动 fallback 到 plaintext） */
+function detectLanguage(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  const map: Record<string, string> = {
+    js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
+    json: 'json', html: 'html', htm: 'html', css: 'css', scss: 'scss', less: 'less',
+    md: 'markdown', mdx: 'markdown', py: 'python', java: 'java', kt: 'kotlin',
+    go: 'go', rs: 'rust', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
+    sh: 'shell', bash: 'shell', yml: 'yaml', yaml: 'yaml', xml: 'xml',
+    sql: 'sql', vue: 'html', php: 'php', rb: 'ruby', swift: 'swift',
+    toml: 'ini', ini: 'ini', conf: 'ini', properties: 'ini',
+  }
+  return map[ext] || 'plaintext'
+}
 
 /** 格式化文件大小为可读字符串 */
 export function formatFileSize(bytes: number | null | undefined): string {
@@ -16,6 +32,34 @@ export interface FileNode {
   directory: boolean
   size: number | null
   modifiedAt: number | null
+}
+
+/** Diff 标签页：用于在编辑器中对比 AI 修改前后的内容 */
+export interface DiffFileTab {
+  key: string
+  /** 标记为 diff 类型 */
+  kind: 'diff'
+  /** 关联的 AiPatchPreview id（用于在 AiPatchStore 中查找最新内容） */
+  previewId: string
+  target: 'local' | 'remote'
+  connectionId?: string
+  path: string
+  name: string
+  language: string
+  /** 修改前的原始内容 */
+  beforeContent: string
+  /** 修改后的内容 */
+  afterContent: string
+  /** 新增行数 */
+  addedLines: number
+  /** 删除行数 */
+  removedLines: number
+}
+
+export type AnyOpenTab = OpenFileTab | DiffFileTab
+
+export function isDiffTab(tab: AnyOpenTab | null | undefined): tab is DiffFileTab {
+  return !!tab && (tab as DiffFileTab).kind === 'diff'
 }
 
 export interface OpenFileTab {
@@ -46,7 +90,7 @@ interface FileExplorerStore {
   loadingRootByConnection: Record<string, boolean>
   errorByConnection: Record<string, string | null>
 
-  openTabs: OpenFileTab[]
+  openTabs: AnyOpenTab[]
   activeTabKey: string | null
 
   /** 追加读取大文件的后续分片 */
@@ -59,10 +103,18 @@ interface FileExplorerStore {
   refreshCurrentPath: (connectionId: string) => Promise<void>
   refreshDirectory: (connectionId: string, path: string) => Promise<void>
   reloadFileByPath: (connectionId: string, path: string) => Promise<string | null>
+  /** 读取远程文件内容（不打开 tab），用于 AI 变更后获取 afterContent */
+  readRemoteFileContent: (connectionId: string, path: string) => Promise<string | null>
   restoreFileContent: (connectionId: string, path: string, content: string) => Promise<boolean>
   setSelectedPath: (connectionId: string, path: string) => void
 
   openFile: (connectionId: string, path: string, name: string) => Promise<void>
+  /**
+   * 打开 Diff 标签页（用于在编辑器中以 diff 模式查看 AI 改动的文件）。
+   * 如果同一 preview 已开过，激活即可；否则新建。
+   */
+  openDiffTab: (previewId: string) => void
+  closeDiffTab: (previewId: string) => void
   updateFileContent: (key: string, content: string) => void
   saveFile: (key: string, useSudo?: boolean) => Promise<boolean>
   setActiveTab: (key: string) => void
@@ -274,13 +326,13 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
   reloadFileByPath: async (connectionId, path) => {
     const key = tabKeyOf(connectionId, path)
     const tab = get().openTabs.find((item) => item.key === key)
-    if (!tab) return null
+    if (!tab || isDiffTab(tab)) return null
 
     const res = await getFileContent(connectionId, path)
     if (res.code !== '0000' || !res.data) {
       set((state) => ({
         openTabs: state.openTabs.map((item) =>
-          item.key === key ? { ...item, loading: false, error: res.info || '读取文件失败' } : item
+          !isDiffTab(item) && item.key === key ? { ...item, loading: false, error: res.info || '读取文件失败' } : item
         ),
       }))
       return null
@@ -289,7 +341,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     const content = res.data.content || ''
     set((state) => ({
       openTabs: state.openTabs.map((item) =>
-        item.key === key
+        !isDiffTab(item) && item.key === key
           ? {
               ...item,
               loading: false,
@@ -308,13 +360,24 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     return content
   },
 
+  readRemoteFileContent: async (connectionId, path) => {
+    try {
+      const res = await getFileContent(connectionId, path)
+      if (res.code !== '0000' || !res.data) return null
+      return res.data.content || ''
+    } catch (err: any) {
+      console.error('[fileExplorerStore] readRemoteFileContent error:', connectionId, path, err)
+      return null
+    }
+  },
+
   restoreFileContent: async (connectionId, path, content) => {
     const key = tabKeyOf(connectionId, path)
     const res = await saveFileContent(connectionId, path, content, false)
     if (res.code !== '0000') {
       set((state) => ({
         openTabs: state.openTabs.map((item) =>
-          item.key === key ? { ...item, error: res.info || '恢复文件失败' } : item
+          !isDiffTab(item) && item.key === key ? { ...item, error: res.info || '恢复文件失败' } : item
         ),
       }))
       return false
@@ -322,7 +385,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
 
     set((state) => ({
       openTabs: state.openTabs.map((item) =>
-        item.key === key
+        !isDiffTab(item) && item.key === key
           ? { ...item, content, loading: false, modified: false, error: undefined }
           : item
       ),
@@ -367,7 +430,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     const res = await getFileContent(connectionId, path)
     if (res.code !== '0000' || !res.data) {
       set((state) => ({
-        openTabs: state.openTabs.map((tab) => tab.key === key
+        openTabs: state.openTabs.map((tab) => !isDiffTab(tab) && tab.key === key
           ? { ...tab, loading: false, error: res.info || '读取文件失败' }
           : tab),
       }))
@@ -375,7 +438,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     }
 
     set((state) => ({
-      openTabs: state.openTabs.map((tab) => tab.key === key
+      openTabs: state.openTabs.map((tab) => !isDiffTab(tab) && tab.key === key
         ? {
             ...tab,
             loading: false,
@@ -391,9 +454,57 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
   },
 
 
+  /**
+   * 打开 Diff 标签页。
+   * 通过 AiPatchPreview 拿到 before/after 内容、语言，生成特殊 tab。
+   * 如果已存在同 preview 的 diff tab，激活即可。
+   */
+  openDiffTab: (previewId) => {
+    const preview = useAiPatchStore.getState().previews.find(p => p.id === previewId)
+    if (!preview) return
+
+    const key = `diff:${previewId}`
+    const existing = get().openTabs.find(t => t.key === key)
+    if (existing) {
+      get().setActiveTab(key)
+      return
+    }
+
+    const sep = preview.path.lastIndexOf('/')
+    const name = sep >= 0 ? preview.path.substring(sep + 1) : preview.path
+    const language = detectLanguage(name)
+
+    const newTab: DiffFileTab = {
+      kind: 'diff',
+      key,
+      previewId: preview.id,
+      target: preview.target,
+      connectionId: preview.connectionId,
+      path: preview.path,
+      name,
+      language,
+      beforeContent: preview.beforeContent,
+      afterContent: preview.afterContent,
+      addedLines: preview.addedLines,
+      removedLines: preview.removedLines,
+    }
+
+    set((state) => ({ openTabs: [...state.openTabs, newTab] }))
+    get().setActiveTab(key)
+  },
+
+  /**
+   * 关闭指定 previewId 的 Diff Tab（不会影响原文件 tab）。
+   */
+  closeDiffTab: (previewId) => {
+    const key = `diff:${previewId}`
+    get().closeTab(key)
+  },
+
+
   loadMoreContent: async (key) => {
     const tab = get().openTabs.find(t => t.key === key)
-    if (!tab || tab.binary || !tab.truncated) return
+    if (!tab || isDiffTab(tab) || tab.binary || !tab.truncated) return
 
     set((state) => ({
       openTabs: state.openTabs.map((t) => t.key === key ? { ...t, loading: true } : t)
@@ -404,7 +515,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
     const res = await getFileContentChunk(tab.connectionId, tab.path, currentOffset, CHUNK)
     if (res.code === '0000' && res.data) {
       set((state) => ({
-        openTabs: state.openTabs.map((t) => t.key === key
+        openTabs: state.openTabs.map((t) => (!isDiffTab(t) && t.key === key)
           ? {
               ...t,
               loading: false,
@@ -423,7 +534,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
   updateFileContent: (key, content) => {
     set((state) => ({
       openTabs: state.openTabs.map((tab) => {
-        if (tab.key === key && tab.content !== content) {
+        if (!isDiffTab(tab) && tab.key === key && tab.content !== content) {
           return { ...tab, content, modified: true }
         }
         return tab
@@ -433,7 +544,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
 
   saveFile: async (key, useSudo = false) => {
     const tab = get().openTabs.find(t => t.key === key)
-    if (!tab) return false
+    if (!tab || isDiffTab(tab)) return false
 
     set((state) => ({
       openTabs: state.openTabs.map((t) => t.key === key ? { ...t, loading: true } : t)
@@ -456,12 +567,16 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
 
   setActiveTab: (key) => {
     set((state) => {
+      // Diff Tab 不走目录展开逻辑
+      if (key.startsWith('diff:')) {
+        return { activeTabKey: key }
+      }
       // 提取 connectionId 和 path
       const colonIdx = key.indexOf(':')
       if (colonIdx > 0) {
         const connectionId = key.substring(0, colonIdx)
         const path = key.substring(colonIdx + 1)
-        
+
         // 自动展开该文件的所有父级目录
         const parts = path.split('/').filter(Boolean)
         const toExpand: string[] = ['/']
@@ -470,11 +585,11 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
           cursor += `/${parts[i]}`
           toExpand.push(cursor)
         }
-        
+
         const currentExpanded = state.expandedByConnection[connectionId] || []
         const newExpanded = [...new Set([...currentExpanded, ...toExpand])]
-        
-        return { 
+
+        return {
           activeTabKey: key,
           expandedByConnection: {
             ...state.expandedByConnection,

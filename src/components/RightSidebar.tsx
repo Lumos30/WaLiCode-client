@@ -3,8 +3,8 @@ import { useThemeStore } from '../stores/themeStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
-import { useFileExplorerStore } from '../stores/fileExplorerStore'
-import { useLocalFileStore } from '../stores/localFileStore'
+import { useFileExplorerStore, isDiffTab } from '../stores/fileExplorerStore'
+import { useLocalFileStore, isLocalDiffTab, type LocalOpenTab } from '../stores/localFileStore'
 import { useAiPatchStore } from '../stores/aiPatchStore'
 import { useOutputStore } from '../stores/outputStore'
 import { usePermissionStore } from '../stores/permissionStore'
@@ -873,8 +873,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const handleAddCurrentFile = () => {
     // 先检查本地文件
     const localTab = useLocalFileStore.getState().openTabs.find(
-      (t) => t.key === useLocalFileStore.getState().activeTabKey
-    )
+      (t) => !isLocalDiffTab(t) && t.key === useLocalFileStore.getState().activeTabKey
+    ) as LocalOpenTab | undefined
     if (localTab && localTab.content) {
       insertTagAtCursor({
         id: `file_${Date.now()}`,
@@ -888,7 +888,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     // 远程文件
     if (!activeTabKey) return
     const tab = openTabs.find(t => t.key === activeTabKey)
-    if (!tab || !tab.content) return
+    if (!tab || isDiffTab(tab) || !tab.content) return
     insertTagAtCursor({
       id: `file_${Date.now()}`,
       label: `文件: ${tab.name}`,
@@ -1132,10 +1132,19 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                 if (isLocalTool) {
                   const localStore = useLocalFileStore.getState()
                   if (changedPath && !isDeleteOp) {
-                    const before = localStore.openTabs.find(t => t.path === changedPath)?.content ?? ''
-                    localStore.reloadFileByPath(changedPath).then(after => {
-                      if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, beforeContent: before, afterContent: after })
-                    }).catch(() => {})
+                    const localTab = localStore.openTabs.find(t => !isLocalDiffTab(t) && t.path === changedPath) as LocalOpenTab | undefined
+                    const before = localTab?.content ?? ''
+                    if (localTab) {
+                      // 文件已打开 → reload 更新 tab 内容 + 创建 preview
+                      localStore.reloadFileByPath(changedPath).then(after => {
+                        if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, beforeContent: before, afterContent: after })
+                      }).catch(() => {})
+                    } else {
+                      // 文件未打开 → 直接读取文件内容创建 preview（beforeContent 为空）
+                      localStore.readFileContent(changedPath).then(after => {
+                        if (after != null) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, beforeContent: '', afterContent: after })
+                      }).catch(() => {})
+                    }
                   }
                   if (!changedPath) {
                     const activeTab = localStore.openTabs.find(t => t.key === localStore.activeTabKey)
@@ -1151,10 +1160,19 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   if (connId) {
                     const fileStore = useFileExplorerStore.getState()
                     if (changedPath && !isDeleteOp) {
-                      const before = fileStore.openTabs.find(t => t.connectionId === connId && t.path === changedPath)?.content ?? ''
-                      fileStore.reloadFileByPath(connId, changedPath).then(after => {
-                        if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, beforeContent: before, afterContent: after })
-                      }).catch(() => {})
+                      const remoteTab = fileStore.openTabs.find(t => !isDiffTab(t) && t.connectionId === connId && t.path === changedPath)
+                      const before = remoteTab && !isDiffTab(remoteTab) ? remoteTab.content : ''
+                      if (remoteTab && !isDiffTab(remoteTab)) {
+                        // 远程文件已打开 → reload 更新 tab 内容 + 创建 preview
+                        fileStore.reloadFileByPath(connId, changedPath).then(after => {
+                          if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, beforeContent: before, afterContent: after })
+                        }).catch(() => {})
+                      } else {
+                        // 远程文件未打开 → 通过 API 读取文件内容创建 preview（beforeContent 为空）
+                        fileStore.readRemoteFileContent(connId, changedPath).then(after => {
+                          if (after != null) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, beforeContent: '', afterContent: after })
+                        }).catch(() => {})
+                      }
                     }
                     if (!changedPath) {
                       const activeTab = fileStore.openTabs.find(t => t.connectionId === connId && t.key === fileStore.activeTabKey)
@@ -1250,18 +1268,73 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         if (changedFiles.length === 0) return
 
         const localStore = useLocalFileStore.getState()
-        for (const file of changedFiles) {
-          if (localStore.openTabs.some((t) => t.path === file.path)) {
-            localStore.reloadFileByPath(file.path).catch(() => {})
-          }
-        }
+        const patchStore = useAiPatchStore.getState()
+        const connId = activeBinding?.connectionId || currentConnectionId
 
-        const connectionId = activeBinding?.connectionId || currentConnectionId
-        if (connectionId) {
-          const fileStore = useFileExplorerStore.getState()
-          for (const file of changedFiles) {
-            if (fileStore.openTabs.some((t) => t.connectionId === connectionId && t.path === file.path)) {
-              fileStore.reloadFileByPath(connectionId, file.path).catch(() => {})
+        for (const file of changedFiles) {
+          // ── 本地文件变更 → 创建 AiPatchPreview ──
+          const localTab = localStore.openTabs.find(t => !isLocalDiffTab(t) && t.path === file.path) as LocalOpenTab | undefined
+          if (localTab) {
+            const before = localTab.content ?? ''
+            localStore.reloadFileByPath(file.path).then((after) => {
+              if (after != null && after !== before) {
+                patchStore.upsertPreview({
+                  target: 'local',
+                  path: file.path,
+                  toolName: file.kind === 'create' ? 'createLocalFile' : 'writeLocalFile',
+                  beforeContent: before,
+                  afterContent: after,
+                })
+              }
+            }).catch(() => {})
+          } else if (localStore.rootPath) {
+            // 文件未在编辑器打开 → 读取当前内容作为 afterContent
+            const fullPath = file.path.startsWith('/') ? file.path : `${localStore.rootPath}/${file.path}`
+            localStore.readFileContent(fullPath).then((after) => {
+              if (after != null) {
+                patchStore.upsertPreview({
+                  target: 'local',
+                  path: fullPath,
+                  toolName: file.kind === 'create' ? 'createLocalFile' : 'writeLocalFile',
+                  beforeContent: '',  // 未打开的文件无 beforeContent
+                  afterContent: after,
+                })
+              }
+            }).catch(() => {})
+          }
+
+          // ── 远程文件变更 → 创建 AiPatchPreview ──
+          if (connId) {
+            const fileStore = useFileExplorerStore.getState()
+            const remoteTab = fileStore.openTabs.find(t => !isDiffTab(t) && t.connectionId === connId && t.path === file.path)
+            if (remoteTab && !isDiffTab(remoteTab)) {
+              const before = remoteTab.content ?? ''
+              fileStore.reloadFileByPath(connId, file.path).then((after) => {
+                if (after != null && after !== before) {
+                  patchStore.upsertPreview({
+                    target: 'remote',
+                    path: file.path,
+                    connectionId: connId,
+                    toolName: file.kind === 'create' ? 'createFile' : 'writeFile',
+                    beforeContent: before,
+                    afterContent: after,
+                  })
+                }
+              }).catch(() => {})
+            } else {
+              // 远程文件未在编辑器打开 → 通过 API 读取 afterContent
+              fileStore.readRemoteFileContent(connId, file.path).then((after) => {
+                if (after != null) {
+                  patchStore.upsertPreview({
+                    target: 'remote',
+                    path: file.path,
+                    connectionId: connId,
+                    toolName: file.kind === 'create' ? 'createFile' : 'writeFile',
+                    beforeContent: '',
+                    afterContent: after,
+                  })
+                }
+              }).catch(() => {})
             }
           }
         }

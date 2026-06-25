@@ -1,9 +1,47 @@
 import { useCallback, useMemo, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
-import { useFileExplorerStore, formatFileSize } from '../stores/fileExplorerStore'
+import { useFileExplorerStore, formatFileSize, isDiffTab } from '../stores/fileExplorerStore'
+import { DiffFileTab } from '../stores/fileExplorerStore'
 import { useAiPatchStore } from '../stores/aiPatchStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 import Editor from '@monaco-editor/react'
+import { DiffEditor } from '@monaco-editor/react'
+
+/** Diff 视图组件：左右对比 before / after */
+function DiffEditorView({ activeTab }: { activeTab: DiffFileTab }) {
+  const { colors, currentTheme } = useThemeStore()
+
+  return (
+    <div className="h-full flex flex-col">
+      <div className="flex items-center justify-between px-3 py-1 shrink-0 border-b" style={{ backgroundColor: colors.bgSecondary, borderColor: colors.border }}>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium" style={{ color: colors.text }}>
+            🔀 Diff: {activeTab.name}
+          </span>
+        </div>
+      </div>
+      <div className="flex-1 min-h-0">
+        <DiffEditor
+          height="100%"
+          language={activeTab.language}
+          theme={currentTheme === 'light' ? 'vs-light' : 'vs-dark'}
+          original={activeTab.beforeContent}
+          modified={activeTab.afterContent}
+          options={{
+            readOnly: true,
+            fontSize: 13,
+            fontFamily: "'JetBrains Mono', 'Fira Code', Consolas, monospace",
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            automaticLayout: true,
+            wordWrap: 'on',
+            renderSideBySide: true,
+          }}
+        />
+      </div>
+    </div>
+  )
+}
 
 export function FileWorkspace() {
   const { colors, currentTheme } = useThemeStore()
@@ -18,11 +56,16 @@ export function FileWorkspace() {
     () => openTabs.find((tab) => tab.key === activeTabKey) ?? null,
     [openTabs, activeTabKey],
   )
+  // Narrowed: only non-diff file tabs (OpenFileTab)
+  const fileTab = useMemo(
+    () => activeTab && !isDiffTab(activeTab) ? activeTab : null,
+    [activeTab],
+  )
   const activePreview = useMemo(
-    () => activeTab
-      ? previews.find((item) => item.target === 'remote' && item.connectionId === activeTab.connectionId && item.path === activeTab.path) ?? null
+    () => fileTab
+      ? previews.find((item) => item.target === 'remote' && item.connectionId === fileTab.connectionId && item.path === fileTab.path) ?? null
       : null,
-    [previews, activeTab],
+    [previews, fileTab],
   )
 
   // 简单的扩展名推断语言
@@ -80,7 +123,7 @@ export function FileWorkspace() {
   }
 
   const handleCancelEdit = () => {
-    if (activeTab?.modified) {
+    if (fileTab?.modified) {
       if (confirm('文件已修改，确定要取消吗？')) {
         setIsEditing(false)
       }
@@ -92,48 +135,51 @@ export function FileWorkspace() {
   return (
     <div className="h-full flex flex-col min-w-0" style={{ backgroundColor: colors.bgTertiary }}>
       <div className="flex-1 overflow-hidden relative">
-        {!activeTab ? (
+        {/* Diff Tab：使用 Monaco DiffEditor 对比 before/after */}
+        {isDiffTab(activeTab) ? (
+          <DiffEditorView activeTab={activeTab} />
+        ) : !fileTab ? (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
               <p className="text-sm" style={{ color: colors.textSecondary }}>暂无打开文件</p>
               <p className="text-xs mt-1" style={{ color: colors.textDim }}>从左侧文件树点击一个文件开始查看</p>
             </div>
           </div>
-        ) : activeTab.loading ? (
+        ) : fileTab.loading ? (
           <div className="h-full flex items-center justify-center">
             <p className="text-sm" style={{ color: colors.textSecondary }}>文件加载中...</p>
           </div>
-        ) : activeTab.error ? (
+        ) : fileTab.error ? (
           <div className="h-full flex items-center justify-center">
-            <p className="text-sm" style={{ color: colors.red }}>{activeTab.error}</p>
+            <p className="text-sm" style={{ color: colors.red }}>{fileTab.error}</p>
           </div>
         ) : (
           <div className="h-full flex flex-col">
-            {activeTab.binary && (
+            {fileTab.binary && (
               <div className="text-xs px-3 py-2 shrink-0 border-b" style={{ backgroundColor: `${colors.yellow}10`, color: colors.yellow, borderColor: colors.border }}>
                 当前文件疑似二进制，暂不支持在线预览。
               </div>
             )}
-            {activeTab.truncated && !activeTab.binary && (
+            {fileTab.truncated && !fileTab.binary && (
               <div className="text-xs px-3 py-2 shrink-0 border-b flex items-center justify-between" style={{ backgroundColor: `${colors.yellow}10`, color: colors.yellow, borderColor: colors.border }}>
-                <span>文件过大（{formatFileSize(activeTab.content.length)}/{formatFileSize(activeTab.size ?? 0)}），当前仅展示前 {formatFileSize(activeTab.content.length)} 内容。</span>
+                <span>文件过大（{formatFileSize(fileTab.content.length)}/{formatFileSize(fileTab.size ?? 0)}），当前仅展示前 {formatFileSize(fileTab.content.length)} 内容。</span>
                 <div className="flex items-center gap-2 shrink-0">
                   <button
-                    onClick={() => loadMoreContent(activeTab.key)}
-                    disabled={activeTab.loading}
+                    onClick={() => loadMoreContent(fileTab.key)}
+                    disabled={fileTab.loading}
                     className="px-2 py-0.5 rounded text-[11px] transition-colors hover:scale-105"
                     style={{ backgroundColor: colors.yellow, color: '#000' }}
                   >
-                    {activeTab.loading ? '加载中...' : '加载更多'}
+                    {fileTab.loading ? '加载中...' : '加载更多'}
                   </button>
                 </div>
               </div>
             )}
             {/* 保存按钮和修改标记 */}
-            {!activeTab.binary && (
+            {!fileTab.binary && (
               <div className="flex items-center justify-between px-3 py-1 shrink-0 border-b" style={{ backgroundColor: colors.bgSecondary, borderColor: colors.border }}>
                 <div className="flex items-center gap-2">
-                  {activeTab.modified && (
+                  {fileTab.modified && (
                     <span className="text-xs" style={{ color: colors.yellow }}>● 已修改</span>
                   )}
                   {useSudo && (
@@ -169,12 +215,12 @@ export function FileWorkspace() {
                       </button>
                       <button
                         onClick={handleSave}
-                        disabled={!activeTab.modified}
+                        disabled={!fileTab.modified}
                         className="flex items-center gap-1 px-3 py-1 rounded text-xs transition-colors"
                         style={{
-                          backgroundColor: activeTab.modified ? colors.accent : 'transparent',
-                          color: activeTab.modified ? '#fff' : colors.textDim,
-                          cursor: activeTab.modified ? 'pointer' : 'not-allowed',
+                          backgroundColor: fileTab.modified ? colors.accent : 'transparent',
+                          color: fileTab.modified ? '#fff' : colors.textDim,
+                          cursor: fileTab.modified ? 'pointer' : 'not-allowed',
                         }}
                       >
                         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -237,7 +283,7 @@ export function FileWorkspace() {
                 </details>
               </div>
             )}
-            {!activeTab.binary && (
+            {!fileTab.binary && (
               <div className="flex-1 min-h-0 relative">
                 {hasSelection && isEditing && (
                   <div className="absolute top-2 right-6 z-10">
@@ -265,12 +311,12 @@ export function FileWorkspace() {
                   </div>
                 )}
                 <Editor
-                  key={`${activeTab.key}:${activeTab.contentVersion ?? 0}`}
+                  key={`${fileTab.key}:${fileTab.contentVersion ?? 0}`}
                   height="100%"
-                  language={getLanguage(activeTab.name)}
+                  language={getLanguage(fileTab.name)}
                   theme={currentTheme === 'light' ? 'vs-light' : 'vs-dark'}
-                  value={activeTab.content || ''}
-                  path={activeTab.path}
+                  value={fileTab.content || ''}
+                  path={fileTab.path}
                   onChange={(value) => {
                     // 始终注册 onChange 确保 value prop 能同步到 editor
                     if (isEditing && value !== undefined) {
@@ -301,7 +347,7 @@ export function FileWorkspace() {
                         
                         const currentActiveTabKey = useFileExplorerStore.getState().activeTabKey
                         const currentActiveTab = useFileExplorerStore.getState().openTabs.find(t => t.key === currentActiveTabKey)
-                        if (!currentActiveTab) return
+                        if (!currentActiveTab || isDiffTab(currentActiveTab)) return
 
                         if (text && text.trim()) {
                           useSshAgentStore.getState().addInputTag({

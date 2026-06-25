@@ -3,7 +3,7 @@ import { useThemeStore } from '../stores/themeStore'
 import { useConnectionStore } from '../stores/connectionStore'
 import { ConnectionStatus } from '../types'
 import { SSHConnectionModal } from './SSHConnectionModal'
-import { useFileExplorerStore, formatFileSize } from '../stores/fileExplorerStore'
+import { useFileExplorerStore, formatFileSize, isDiffTab } from '../stores/fileExplorerStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 import { getFileContent, createFile, createDirectory, renameFile, deleteFile, downloadFileUrl, uploadFile } from '../api/sshFile'
 import { LocalFileExplorer } from './LocalFileExplorer'
@@ -443,7 +443,7 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
     } else {
       const key = `${connectionId}:${node.path}`
       const existingTab = useFileExplorerStore.getState().openTabs.find(t => t.key === key)
-      let content = existingTab?.content
+      let content = existingTab && !isDiffTab(existingTab) ? existingTab.content : undefined
       
       if (!content) {
         const res = await getFileContent(connectionId, node.path)

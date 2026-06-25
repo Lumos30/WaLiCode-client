@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
-import { useLocalFileStore, type LocalFileNode } from '../stores/localFileStore'
+import { useLocalFileStore, type LocalFileNode, type LocalOpenTab, isLocalDiffTab } from '../stores/localFileStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
 
 export function LocalFileExplorer() {
@@ -45,12 +45,12 @@ export function LocalFileExplorer() {
       })
     } else {
       // 文件：读取内容
-      const tab = useLocalFileStore.getState().openTabs.find((t) => t.path === node.path)
+      const tab = useLocalFileStore.getState().openTabs.find((t) => !isLocalDiffTab(t) && t.path === node.path) as LocalOpenTab | undefined
       let content = tab?.content
       if (!content) {
         // 触发文件加载
         await openFile(node.path)
-        const updated = useLocalFileStore.getState().openTabs.find((t) => t.path === node.path)
+        const updated = useLocalFileStore.getState().openTabs.find((t) => !isLocalDiffTab(t) && t.path === node.path) as LocalOpenTab | undefined
         content = updated?.content || ''
       }
       store.addInputTag({
