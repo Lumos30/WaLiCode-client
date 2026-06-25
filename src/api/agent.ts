@@ -4,6 +4,7 @@
 import { get, post, getBaseUrl } from './request'
 import { toolProgressStore } from '../components/ToolProgressBar'
 import { chatConfig } from '../config/chat'
+import { invoke } from '@tauri-apps/api/core'
 
 export interface AiAgentConfigDTO {
   agentId: string
@@ -62,6 +63,7 @@ export interface ReActEvent {
     | 'tool_output'
     | 'round_start'
     | 'status'
+    | 'execute_local_command'
   content?: string
   toolCallId?: string
   toolName?: string
@@ -93,6 +95,14 @@ export interface ReActEvent {
   outputChunk?: string
   /** 状态更新消息 (event=status) */
   statusMessage?: string
+  /** 本地指令 ID (event=execute_local_command) */
+  cmdId?: string
+  /** 本地命令 (event=execute_local_command) */
+  command?: string
+  /** 工作目录 (event=execute_local_command) */
+  cwd?: string
+  /** 超时时间毫秒 (event=execute_local_command) */
+  timeoutMs?: number
 }
 
 /** 权限确认事件数据 */
@@ -291,6 +301,20 @@ export function reactChatStream(
         onError(`HTTP ${res.status}: ${res.statusText}`)
         return
       }
+
+      // Phase 2: SSE 重连成功后，检查断线期间缓存的结果
+      if (streamReconnectCount > 0 || retryCount > 0) {
+        console.log('[SSE] 重连成功，检查断线期间缓存的结果...')
+        fetch(`${getBaseUrl()}/api/v1/tool_result/pending_all`)
+          .then(r => r.json())
+          .then(data => {
+            if (data.code === '0000' && data.data && Object.keys(data.data).length > 0) {
+              console.log(`[SSE] 发现 ${Object.keys(data.data).length} 个断线期间缓存的结果`)
+            }
+          })
+          .catch(err => console.warn('[SSE] 检查缓存结果失败:', err.message))
+      }
+
       const reader = res.body!.getReader()
       if (!reader) {
         onError('No response body')
@@ -368,6 +392,9 @@ export function reactChatStream(
       }
 
       function processEvent(event: ReActEvent) {
+        // Phase 2: 全事件类型日志（调试用）
+        console.debug(`[SSE] event=${event.event}, cmdId=${event.cmdId || '-'}, toolName=${event.toolName || '-'}`)
+
         switch (event.event) {
           case 'text': {
             // 文本流 → 更新累积文本
@@ -568,6 +595,83 @@ export function reactChatStream(
             if (event.content) {
               onRoundStart?.(parseInt(event.content, 10) || 1)
             }
+            break
+          }
+
+          case 'execute_local_command': {
+            // SSE 收到指令 → 直接执行 → POST 回传结果
+            // GET /tool_result/pending 仅用于 SSE 断线重连后补取错过的指令
+            const cmdId = event.cmdId || ''
+            const command = event.command || ''
+            const cwd = event.cwd || undefined
+            const cmdTimeoutMs = event.timeoutMs || 60000
+
+            if (!cmdId || !command) {
+              console.warn('[SSE] execute_local_command missing cmdId or command', event)
+              break
+            }
+
+            console.log(`[SSE] 收到本地指令: cmdId=${cmdId}, command=${command}`)
+
+            // 异步执行本地命令并回传结果
+            ;(async () => {
+              const startTime = Date.now()
+              try {
+                // 调用 Tauri 本地命令执行
+                const result = await invoke<{ success: boolean; stdout: string; stderr: string; exit_code: number }>(
+                  'execute_shell_cmd',
+                  {
+                    command,
+                    cwd,
+                    timeoutMs: cmdTimeoutMs,
+                    autoBackground: false,
+                  }
+                )
+
+                const durationMs = Date.now() - startTime
+                const output = (result.stdout || '') + (result.stderr ? `\n${result.stderr}` : '')
+
+                console.log(`[SSE] 本地指令执行完成: cmdId=${cmdId}, exitCode=${result.exit_code}, durationMs=${durationMs}`)
+
+                // 回传结果给 Server
+                const baseUrl = getBaseUrl()
+                await fetch(`${baseUrl}/api/v1/tool_result`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    cmdId,
+                    sessionId,
+                    status: result.success ? 'SUCCESS' : 'ERROR',
+                    output,
+                    exitCode: result.exit_code,
+                    durationMs,
+                    success: result.success,
+                  }),
+                })
+              } catch (err: any) {
+                const durationMs = Date.now() - startTime
+                console.error(`[SSE] 本地指令执行失败: cmdId=${cmdId}`, err)
+
+                // 回传错误结果
+                try {
+                  const baseUrl = getBaseUrl()
+                  await fetch(`${baseUrl}/api/v1/tool_result`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      cmdId,
+                      sessionId,
+                      status: 'ERROR',
+                      error: err?.message || '本地命令执行失败',
+                      durationMs,
+                      success: false,
+                    }),
+                  })
+                } catch (postErr) {
+                  console.error(`[SSE] 回传指令结果失败: cmdId=${cmdId}`, postErr)
+                }
+              }
+            })()
             break
           }
 
