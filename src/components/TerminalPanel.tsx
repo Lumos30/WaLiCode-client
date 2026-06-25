@@ -62,7 +62,7 @@ export function TerminalPanel({
 }: TerminalPanelProps) {
   const { colors } = useThemeStore()
   const { currentConnectionId, connections, connect, disconnect } = useConnectionStore()
-  const { addInputTag } = useSshAgentStore()
+  const { addInputTag, registerConnectionSession, unregisterConnectionSession } = useSshAgentStore()
 
   // 使用全局终端状态而不是组件内状态
   const terminalStates = useRef<Map<string, ConnectionTerminalState>>(globalTerminalStates)
@@ -214,6 +214,8 @@ export function TerminalPanel({
 
     if (state.session) {
       closeTerminal(state.session.sessionId).catch(() => {})
+      // 移除 connectionId → terminalSessionId 映射
+      unregisterConnectionSession(connectionId)
     }
 
     state.onDataDisposable?.dispose()
@@ -349,6 +351,9 @@ export function TerminalPanel({
 
       const { sessionId, initialOutput } = res.data!
       state.session = { sessionId, connectionId }
+
+      // 注册 connectionId → terminalSessionId 映射到全局 Store
+      registerConnectionSession(connectionId, sessionId)
 
       // 通知父组件会话已建立
       if (connectionId === currentConnectionId) {

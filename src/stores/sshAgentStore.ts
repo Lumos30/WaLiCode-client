@@ -39,9 +39,17 @@ interface InputTag {
   /** 完整内容 */
   fullContent: string
   /** 标签类型 */
-  type: 'terminal-selection' | 'file' | 'custom'
+  type: 'terminal-selection' | 'file' | 'directory' | 'custom' | 'connection'
   /** 添加时间 */
   addedAt: number
+  /** 连接信息（仅 connection 类型） */
+  connectionInfo?: {
+    connectionId: string
+    connectionName: string
+    host: string
+    port: number
+    username: string
+  }
 }
 
 interface SshAgentStore {
@@ -54,6 +62,10 @@ interface SshAgentStore {
   isBinding: boolean
   /** 绑定错误信息 */
   bindingError: string | null
+
+  // ===== 终端会话映射 =====
+  /** connectionId → terminalSessionId 映射（由 TerminalPanel 维护） */
+  connectionSessionMap: Map<string, string>
 
   // ===== 输入框标签 =====
   /** 输入框中的标签列表 */
@@ -85,6 +97,16 @@ interface SshAgentStore {
 
   /** 设置当前激活的绑定 */
   setActiveBinding: (binding: SshAgentBinding | null) => void
+
+  // ===== 终端会话映射操作 =====
+  /** 注册 connectionId → terminalSessionId 映射 */
+  registerConnectionSession: (connectionId: string, terminalSessionId: string) => void
+
+  /** 移除 connectionId 映射 */
+  unregisterConnectionSession: (connectionId: string) => void
+
+  /** 通过 connectionId 查找 terminalSessionId */
+  getTerminalSessionByConnection: (connectionId: string) => string | undefined
 
   // ===== 输入框标签操作 =====
   /** 添加标签到输入框 */
@@ -122,6 +144,7 @@ export const useSshAgentStore = create<SshAgentStore>((set, get) => ({
   bindings: new Map(),
   isBinding: false,
   bindingError: null,
+  connectionSessionMap: new Map(),
   inputTags: [],
   showConnectionSelector: false,
 
@@ -245,6 +268,26 @@ export const useSshAgentStore = create<SshAgentStore>((set, get) => ({
   openConnectionSelector: () => set({ showConnectionSelector: true }),
 
   closeConnectionSelector: () => set({ showConnectionSelector: false }),
+
+  registerConnectionSession: (connectionId, terminalSessionId) => {
+    set((state) => {
+      const map = new Map(state.connectionSessionMap)
+      map.set(connectionId, terminalSessionId)
+      return { connectionSessionMap: map }
+    })
+  },
+
+  unregisterConnectionSession: (connectionId) => {
+    set((state) => {
+      const map = new Map(state.connectionSessionMap)
+      map.delete(connectionId)
+      return { connectionSessionMap: map }
+    })
+  },
+
+  getTerminalSessionByConnection: (connectionId) => {
+    return get().connectionSessionMap.get(connectionId)
+  },
 
   clearBindingError: () => set({ bindingError: null }),
 

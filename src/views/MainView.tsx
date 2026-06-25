@@ -143,6 +143,21 @@ export function MainView() {
   // 处理终端会话变化
   const handleTerminalSessionChange = useCallback((sessionId: string | null) => {
     setActiveTerminalSessionId(sessionId)
+    // SSH 终端会话创建成功 → 自动打开终端面板
+    if (sessionId) {
+      setTerminalVisible(true)
+    }
+  }, [])
+
+  // 监听左侧面板 SSH 连接开关事件：连接成功后自动打开 SSH 终端面板
+  useEffect(() => {
+    const handler = (_e: CustomEvent<{ connectionId: string }>) => {
+      setTerminalVisible(true)
+      setIsTerminalActive(true)
+      setActiveTab('servers')
+    }
+    window.addEventListener('open-ssh-terminal', handler as EventListener)
+    return () => window.removeEventListener('open-ssh-terminal', handler as EventListener)
   }, [])
 
   // 监听 fileExplorerStore.activeTabKey 变化：当远程文件/diff tab 被激活时，自动切换到 files 标签页并显示文件视图

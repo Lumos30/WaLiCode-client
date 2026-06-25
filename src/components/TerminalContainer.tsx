@@ -42,6 +42,13 @@ export function TerminalContainer({
     }
   }, [sshAvailable, activeTab])
 
+  // SSH 连接成功时自动切到 SSH 终端
+  useEffect(() => {
+    if (sshAvailable && activeTab !== 'ssh') {
+      setActiveTab('ssh')
+    }
+  }, [sshAvailable])
+
   return (
     <div className="h-full flex flex-col min-w-0" style={{ backgroundColor: colors.bgPrimary }}>
       <div className="flex items-center" style={{ borderBottom: `1px solid ${colors.border}` }}>

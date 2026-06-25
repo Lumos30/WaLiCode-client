@@ -392,7 +392,12 @@ export function LeftSidebar({ activeTab }: { activeTab: TabId }) {
     if (conn.status === ConnectionStatus.CONNECTED) {
       await disconnect(conn.id)
     } else {
-      await connect(conn.id)
+      const ok = await connect(conn.id)
+      if (ok) {
+        // 连接成功 → 选中该连接并自动打开 SSH 终端面板
+        selectConnection(conn.id)
+        window.dispatchEvent(new CustomEvent('open-ssh-terminal', { detail: { connectionId: conn.id } }))
+      }
     }
     setConnectingId(null)
   }

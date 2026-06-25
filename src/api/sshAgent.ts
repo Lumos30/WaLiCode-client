@@ -4,7 +4,7 @@
  */
 import { get, post } from './request'
 
-const BASE = '/api/v1/ssh/agent'
+const BASE = '/api/v1'
 
 // ===== 类型定义 =====
 

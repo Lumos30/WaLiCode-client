@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react'
+import React, { useRef, useEffect, useState, useMemo } from 'react'
 import { useThemeStore } from '../stores/themeStore'
 import { useAgentStore } from '../stores/agentStore'
 import { useConnectionStore } from '../stores/connectionStore'
@@ -528,7 +528,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     agents,
     currentAgentId,
     fetchAgents,
-    setCurrentAgentId,
+    // setCurrentAgentId 不再使用（统一 Agent 后无需切换）
     createServerSession,
   } = useAgentStore()
 
@@ -542,10 +542,16 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     removeInputTag,
     getInputTagsContent,
     clearInputTags,
+    getTerminalSessionByConnection,
   } = useSshAgentStore()
 
+  // 统一 Agent 后：初始化时自动设置 currentAgentId 为 200000
   useEffect(() => {
     fetchAgents()
+    // 如果 currentAgentId 为空或不是 200000，自动切换
+    if (!currentAgentId) {
+      useAgentStore.getState().setCurrentAgentId('200000')
+    }
   }, [fetchAgents])
 
   const currentSession = currentSessionId ? sessions.get(currentSessionId) : null
@@ -574,13 +580,25 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const [cmdMenuIndex, setCmdMenuIndex] = useState(-1)
   const [cmdMenuQuery, setCmdMenuQuery] = useState('')
 
-  // 可用的 @ 提及列表
-  const mentionItems: MenuItem[] = [
-    { id: 'current-file', label: '当前文件', description: '插入当前打开的文件', icon: '📄', insertText: '@当前文件' },
-    { id: 'current-folder', label: '当前目录', description: '插入当前工作目录', icon: '📁', insertText: '@当前目录' },
-    { id: 'terminal', label: '终端', description: '插入终端选中文本', icon: '💻', insertText: '@终端' },
-    { id: 'connection', label: 'SSH 连接', description: '插入当前连接信息', icon: '🔗', insertText: '@SSH连接' },
-  ]
+  // 可用的 @ 提及列表（动态生成：已连接的 SSH 服务器 + 固定项）
+  const mentionItems: MenuItem[] = useMemo(() => {
+    const serverItems: MenuItem[] = connections
+      .filter(c => c.status === ConnectionStatus.CONNECTED)
+      .map(c => ({
+        id: `server-${c.id}`,
+        label: c.name,
+        description: `${c.username}@${c.host}:${c.port}`,
+        icon: '🖥️',
+        insertText: `@${c.name}`,
+      }))
+    const fixedItems: MenuItem[] = [
+      { id: 'current-file', label: '当前文件', description: '插入当前打开的文件', icon: '📄', insertText: '@当前文件' },
+      { id: 'current-folder', label: '当前目录', description: '插入当前工作目录', icon: '📁', insertText: '@当前目录' },
+      { id: 'terminal', label: '终端', description: '插入终端选中文本', icon: '💻', insertText: '@终端' },
+    ]
+    // 有已连接服务器时排在最前面
+    return [...serverItems, ...fixedItems]
+  }, [connections])
 
   // --- SSE 心跳超时检测 ---
   useEffect(() => {
@@ -610,12 +628,12 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   // --- 输入历史导航（支持文本 + 标签恢复） ---
   interface HistoryEntry {
     text: string
-    tags: Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'custom' }>
+    tags: Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'directory' | 'custom' | 'connection'; connectionInfo?: { connectionId: string; connectionName: string; host: string; port: number; username: string } }>
   }
   const historyRef = useRef<HistoryEntry[]>([])
   const historyIndexRef = useRef<number>(-1) // -1 = 当前输入
   const savedInputRef = useRef<string>('') // 导航前的当前输入
-  const savedInputTagsRef = useRef<Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'custom' }>>([]) // 导航前的当前标签
+  const savedInputTagsRef = useRef<Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'directory' | 'custom' | 'connection'; connectionInfo?: { connectionId: string; connectionName: string; host: string; port: number; username: string } }>>([]) // 导航前的当前标签
 
   // 从 localStorage 加载历史
   useEffect(() => {
@@ -636,7 +654,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   }
 
   // 添加一条历史记录（发送时调用）
-  const pushHistory = (text: string, tags: Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'custom' }>) => {
+  const pushHistory = (text: string, tags: Array<{ label: string; fullContent: string; type: 'terminal-selection' | 'file' | 'directory' | 'custom' | 'connection'; connectionInfo?: { connectionId: string; connectionName: string; host: string; port: number; username: string } }>) => {
     if (!text.trim() && tags.length === 0) return
     const history = [...historyRef.current]
     // 避免连续重复（比较文本+标签数量）
@@ -863,7 +881,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     createServerSession,
   ])
 
-  const insertTagAtCursor = (tag: { id: string; label: string; type: 'terminal-selection' | 'file' | 'custom'; fullContent: string }) => {
+  const insertTagAtCursor = (tag: { id: string; label: string; type: 'terminal-selection' | 'file' | 'custom' | 'connection'; fullContent: string }) => {
     if (!inputRef.current) return
     // 仅写入 Zustand store（store 渲染层负责显示标签，避免 DOM 插入导致重复）
     addInputTag(tag)
@@ -1012,15 +1030,28 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       displayContent = plainText ? `${plainText}\n\n${displayTags}` : displayTags
     }
 
-    const selectedConn = activeBinding
-      ? connections.find((c) => c.id === activeBinding.connectionId)
-      : connections.find((c) => c.id === currentConnectionId && c.status === ConnectionStatus.CONNECTED)
-    if (activeBinding || selectedConn) {
-      const conn = activeBinding ? connections.find((c) => c.id === activeBinding.connectionId) : selectedConn!
-      if (conn) {
-        const serverContext = `当前服务器：${conn.name} (${conn.username}@${conn.host}:${conn.port})`
-        messageContent = `${serverContext}\n\n${messageContent}`
+    // SSH 服务器上下文：优先使用用户 @ 选择的服务器标签，否则自动查找已绑定/已连接的连接
+    const connectionTag = inputTags.find(t => t.type === 'connection')
+    let sshContextConn: { connectionId: string; connectionName: string; host: string; port: number; username: string } | null = null
+    if (connectionTag?.connectionInfo) {
+      sshContextConn = connectionTag.connectionInfo
+    } else {
+      const selectedConn = activeBinding
+        ? connections.find((c) => c.id === activeBinding.connectionId)
+        : connections.find((c) => c.id === currentConnectionId && c.status === ConnectionStatus.CONNECTED)
+      if (selectedConn) {
+        sshContextConn = {
+          connectionId: selectedConn.id,
+          connectionName: selectedConn.name,
+          host: selectedConn.host,
+          port: selectedConn.port,
+          username: selectedConn.username,
+        }
       }
+    }
+    if (sshContextConn) {
+      const serverContext = `当前服务器：${sshContextConn.connectionName} (${sshContextConn.username}@${sshContextConn.host}:${sshContextConn.port})`
+      messageContent = `${serverContext}\n\n${messageContent}`
     }
 
     const groupId = `group_${Date.now()}`
@@ -1249,7 +1280,14 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           details: userFriendlyMsg !== err ? err : undefined,
         })
       },
-      activeTerminalSessionId || undefined,
+      // terminalSessionId：优先使用 @ 服务器标签对应终端会话
+      (() => {
+        if (connectionTag?.connectionInfo) {
+          const tsId = getTerminalSessionByConnection(connectionTag.connectionInfo.connectionId)
+          if (tsId) return tsId
+        }
+        return activeTerminalSessionId || undefined
+      })(),
       // onTaskBreakdown
       (_breakdown: TaskBreakdownDTO) => {
         // TODO: 多消息流模式下需要新建 task_breakdown 类型消息
@@ -1609,6 +1647,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
               }
 
               const { colors } = useThemeStore.getState()
+              // 只有最后一个 AI 回合块显示 loading 状态，避免旧对话也显示"正在分析"
+              let lastAiTurnIdx = -1
+              for (let k = items.length - 1; k >= 0; k--) {
+                if (items[k].type === 'aiTurn') { lastAiTurnIdx = k; break }
+              }
 
               return items.map((item, idx) => {
                 const dividerEl = item.showDivider ? (
@@ -1625,7 +1668,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   return (
                     <React.Fragment key={`single_${item.msg.id}_${idx}`}>
                       {dividerEl}
-                      <MessageBubble message={item.msg} isLoading={isLoading} onEditRetry={(msgId) => {
+                      <MessageBubble message={item.msg} isLoading={false} onEditRetry={(msgId) => {
                         if (currentSessionId) {
                           editAndRetry(currentSessionId, msgId)
                           setTimeout(() => inputRef.current?.focus(), 50)
@@ -1636,10 +1679,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                 }
 
                 // AI 回合块
+                const isLastAiTurn = idx === lastAiTurnIdx
                 return (
                   <React.Fragment key={`aiturn_${item.groupId}_${idx}`}>
                     {dividerEl}
-                    <AiTurnBlock msgs={item.msgs} colors={colors} isLoading={isLoading} streamStatus={streamStatus} onRetry={() => {
+                    <AiTurnBlock msgs={item.msgs} colors={colors} isLoading={isLastAiTurn && isLoading} streamStatus={streamStatus} onRetry={() => {
                       setErrorRecovery(null)
                       if (currentSession && currentSession.messages.length >= 2) {
                         const lastUserMsg = [...currentSession.messages].reverse().find(m => m.role === 'user')
@@ -1722,13 +1766,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       {/* 产物汇总面板 — 参考 Android 端设计，放在输入框上方 */}
       <ArtifactSummaryPanel />
 
-      {/* SSH 未连接提示 */}
-      {currentAgentId === '100000' && !activeTerminalSessionId && (
+      {/* SSH 未连接提示（统一 Agent：远程工具需要 SSH 连接） */}
+      {!activeTerminalSessionId && (
         <div className="flex items-center gap-2 px-4 py-1.5 text-[11px] flex-shrink-0" style={{ backgroundColor: 'rgba(245,158,11,0.1)', color: '#f59e0b', borderBottom: `1px solid ${colors.border}` }}>
           <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
-          <span>未连接 SSH 终端，executeCommand 工具不可用。请先在终端中建立 SSH 连接。</span>
+          <span>未连接 SSH 终端，远程运维工具不可用。本地编码功能正常，如需远程操作请先建立 SSH 连接。</span>
         </div>
       )}
 
@@ -1814,11 +1858,33 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                       }
                     }
                   }}
-                  title={tag.type === 'file' ? '双击跳转到文件' : tag.type === 'terminal-selection' ? '双击跳转到终端' : undefined}
+                  title={tag.type === 'file' ? '双击跳转到文件' : tag.type === 'terminal-selection' ? '双击跳转到终端' : tag.type === 'connection' ? 'SSH 服务器连接' : tag.type === 'directory' ? '工作目录' : undefined}
                 >
-                  <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                  </svg>
+                  {tag.type === 'connection' ? (
+                    <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
+                      <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                      <line x1="8" y1="21" x2="16" y2="21"></line>
+                      <line x1="12" y1="17" x2="12" y2="21"></line>
+                    </svg>
+                  ) : tag.type === 'file' ? (
+                    <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                    </svg>
+                  ) : tag.type === 'directory' ? (
+                    <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                  ) : tag.type === 'terminal-selection' ? (
+                    <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
+                      <polyline points="4 17 10 11 4 5"></polyline>
+                      <line x1="12" y1="19" x2="20" y2="19"></line>
+                    </svg>
+                  ) : (
+                    <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke={colors.accent} strokeWidth="2">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                  )}
                   <span className="truncate">{tag.label}</span>
                   <button onClick={() => removeInputTag(tag.id)} className="p-0.5 rounded hover:bg-black/10 flex-shrink-0" style={{ color: colors.textDim }}>
                     <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -2036,13 +2102,55 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   }
                 }
               } else {
-                // @ 提及选择：插入标签
+                // @ 提及选择：全部创建标签（不发送，插入输入框）
+                if (item.id.startsWith('server-')) {
+                  // 选择已连接的 SSH 服务器 → connection 标签
+                  const connId = item.id.replace('server-', '')
+                  const conn = connections.find(c => c.id === connId)
+                  if (conn) {
+                    addInputTag({
+                      label: conn.name,
+                      fullContent: `当前服务器：${conn.name} (${conn.username}@${conn.host}:${conn.port})`,
+                      type: 'connection',
+                      connectionInfo: {
+                        connectionId: conn.id,
+                        connectionName: conn.name,
+                        host: conn.host,
+                        port: conn.port,
+                        username: conn.username,
+                      },
+                    })
+                  }
+                } else if (item.id === 'current-file') {
+                  // 当前文件 → file 标签
+                  addInputTag({
+                    label: '当前文件',
+                    fullContent: '当前打开的文件（待获取具体路径）',
+                    type: 'file',
+                  })
+                } else if (item.id === 'current-folder') {
+                  // 当前目录 → directory 标签
+                  addInputTag({
+                    label: '当前目录',
+                    fullContent: '当前工作目录（待获取具体路径）',
+                    type: 'directory',
+                  })
+                } else if (item.id === 'terminal') {
+                  // 终端选中文本 → terminal-selection 标签
+                  addInputTag({
+                    label: '终端',
+                    fullContent: '终端选中文本（待获取具体内容）',
+                    type: 'terminal-selection',
+                  })
+                }
+                // 所有 @ 提及：移除输入框中的 @触发文本
                 if (inputRef.current) {
                   const text = inputRef.current.innerText
                   const before = text.slice(0, cmdMenuIndex)
                   const after = text.slice(cmdMenuIndex + cmdMenuQuery.length + 1)
-                  inputRef.current.innerText = before + item.insertText + ' ' + after
+                  inputRef.current.innerText = before + after
                   setInputText(inputRef.current.innerText)
+                  setInputKey((k) => k + 1)
                 }
               }
               setCmdMenuTrigger(null)
@@ -2052,18 +2160,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         )}
 
         <div className="flex items-center mt-2 text-[11px]" style={{ color: colors.textDim }}>
-          <div className="relative" style={{ zIndex: 10 }}>
-            <select value={currentAgentId || ''} onChange={(e) => setCurrentAgentId(e.target.value)} className="flex items-center gap-1.5 px-2 py-1 rounded-md cursor-pointer transition-colors appearance-none pr-6" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, fontSize: '11px', border: 'none' }}>
-              {agents.length === 0 && <option value="">加载中...</option>}
-              {agents.map((agent) => (
-                <option key={agent.agentId} value={agent.agentId}>
-                  {agent.agentName}
-                </option>
-              ))}
-            </select>
-            <svg className="absolute right-1.5 top-1/2 -translate-y-1/2 pointer-events-none" style={{ width: 12, height: 12, color: colors.textSecondary, opacity: 0.6 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, fontSize: '11px' }}>
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>
+            <span>{agents.find(a => a.agentId === '200000')?.agentName || 'WaLiCode Agent'}</span>
           </div>
           <div className="flex-1" />
           <div className="relative">
