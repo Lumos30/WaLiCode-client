@@ -1005,18 +1005,33 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
     const tagsContent = getInputTagsContent()
     if (tagsContent) {
-      // messageContent 发给后端：图片标签保留描述文字（AI 可通过 inlineDatas 看到图片）
-      const serverTagsContent = inputTags.map(tag => {
+      // messageContent 发给后端：按标签类型结构化注入，避免历史上下文误导当前意图
+      const serverTagParts: string[] = []
+      inputTags.forEach(tag => {
         const dataUrlMatch = tag.fullContent.match(/(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+/=]+)/)
         if (dataUrlMatch) {
-          return `[用户上传了图片: ${tag.label}]`
+          serverTagParts.push(`[用户上传了图片: ${tag.label}]`)
+          return
         }
-        return tag.fullContent
-      }).join('\n\n---\n\n')
-      const formattedServerTags = serverTagsContent.split('\n').map(line => `> ${line}`).join('\n')
-      messageContent = plainText
-        ? `${plainText}\n\n**参考上下文：**\n${formattedServerTags}`
-        : `**参考上下文：**\n${formattedServerTags}`
+        // 按标签类型明确标注角色，让 AI 区分"操作目标"和"参考信息"
+        if (tag.type === 'directory') {
+          serverTagParts.push(`[当前操作目标目录: ${tag.label}]\n${tag.fullContent}`)
+        } else if (tag.type === 'file') {
+          serverTagParts.push(`[当前操作目标文件: ${tag.label}]\n${tag.fullContent}`)
+        } else if (tag.type === 'connection') {
+          serverTagParts.push(`[当前SSH连接: ${tag.label}]\n${tag.fullContent}`)
+        } else if (tag.type === 'terminal-selection') {
+          serverTagParts.push(`[终端选区参考: ${tag.label}]\n${tag.fullContent}`)
+        } else {
+          serverTagParts.push(tag.fullContent)
+        }
+      })
+      const formattedServerTags = serverTagParts.join('\n\n---\n\n').split('\n').map(line => `> ${line}`).join('\n')
+      // 明确告知 AI：用户当前意图由文本决定，标签仅提供操作目标/上下文
+      const intentHint = plainText
+        ? `${plainText}\n\n**当前操作目标和上下文（请以用户文本意图为准）：**\n${formattedServerTags}`
+        : `**当前操作目标和上下文：**\n${formattedServerTags}`
+      messageContent = intentHint
 
       // displayContent 仅前端渲染：图片用 Markdown 图片语法渲染预览
       const displayTags = inputTags.map(tag => {

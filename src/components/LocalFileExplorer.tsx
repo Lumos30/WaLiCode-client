@@ -41,7 +41,7 @@ export function LocalFileExplorer() {
       store.addInputTag({
         label: `目录: ${node.name}`,
         fullContent: `本地目录: ${node.path}\n\n目录内容:\n${fileList}`,
-        type: 'custom',
+        type: 'directory',
       })
     } else {
       // 文件：读取内容
