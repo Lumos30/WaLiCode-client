@@ -289,8 +289,10 @@ function restoreTableLines(text: string, store: string[]): string {
 
 function protectElements(text: string, store: string[]): string {
   let r = text
-  // 1. 围栏代码块 ```...``` → CB
+  // 1. 围栏代码块 ```...``` → CB（严格匹配，需闭合）
   r = replaceAndStoreJS(r, /```[^\n]*\n[\s\S]*?```/g, store, CB_PREFIX)
+  // 1b. 兜底：未闭合的围栏代码块（AI 流式输出可能缺少结尾 ```）
+  r = replaceAndStoreJS(r, /```[^\n]*\n[\s\S]*$/g, store, CB_PREFIX)
   // 2. 行内代码 `...` → IC
   r = replaceAndStoreJS(r, /`[^`\n]+`/g, store, IC_PREFIX)
   // 3. 加粗 **...** → IC（必须在斜体之前提取）
