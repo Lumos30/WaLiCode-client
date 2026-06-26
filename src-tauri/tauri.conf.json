@@ -15,9 +15,9 @@
       {
         "title": "WaLiCode - AI DevOps Assistant",
         "width": 1280,
-        "height": 800,
+        "height": 920,
         "minWidth": 900,
-        "minHeight": 600,
+        "minHeight": 680,
         "center": true,
         "resizable": true
       }

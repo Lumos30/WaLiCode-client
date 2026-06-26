@@ -858,11 +858,11 @@ function normalizeMarkdown(text: string): string {
   r = r.replace(/[ \t]+\n/g, '\n')
   r = r.replace(/^\s+/, '').replace(/\s+$/, '')
 
-  // 阶段 5：恢复代码块和行内元素
-  r = restoreElements(r, store)
-
-  // 阶段 5.5：恢复被保护的表格行
+  // 阶段 5：恢复被保护的表格行（必须在恢复代码块之前，因为表格行内可能含 IC/CB 占位符）
   r = restoreTableLines(r, tableStore)
+
+  // 阶段 5.5：恢复代码块和行内元素
+  r = restoreElements(r, store)
 
   // 阶段 6：Markdown 展示块二次归一化
   r = normalizeMarkdownShowcaseBlocksJS(r)
