@@ -522,7 +522,8 @@ export function reactChatStream(
             if (event.content) {
               try {
                 const result = JSON.parse(event.content)
-                finalContent = result.assistantContent || result.content || ''
+                // assistantContent 不存在于 ReActResultDTO，直接取 content
+                finalContent = result.content || ''
               } catch (e) {
                 console.warn('[SSE done] Failed to parse result JSON:', e)
                 finalContent = ''

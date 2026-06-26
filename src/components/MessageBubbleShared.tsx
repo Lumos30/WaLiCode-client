@@ -243,58 +243,649 @@ export function getToolIconInfo(toolName: string): { icon: React.ReactNode; colo
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  极简 Markdown 兜底处理（后端 MarkdownNormalizer 已做主要工作）
+//  Markdown 归一化（与后端 MarkdownNormalizer 对齐）
+//  流式阶段前端也做归一化，确保渲染一致性
 // ═══════════════════════════════════════════════════════════════
+
+const CB_PREFIX = '\u0001CB'
+const CB_SUFFIX = '\u0001'
+const IC_PREFIX = '\u0001IC'
+
+/**
+ * 保护代码块和行内元素，替换为占位符
+ * CB_PREFIX: 代码块（前后需断行）
+ * IC_PREFIX: 行内元素（加粗/斜体/行内代码，前后不断行）
+ */
+const TB_PREFIX = '\u0001TB'
+const TB_SUFFIX = '\u0001'
+
+/**
+ * 保护表格行（| 开头的行），避免被列表规则误匹配
+ * 表格行中的 | -- | 等内容会被 [-*+]\s 规则误判为列表
+ */
+function protectTableLines(text: string, store: string[]): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim()
+    if (trimmed.startsWith('|') && trimmed.length > 1 && isTableRowJS(trimmed)) {
+      const placeholder = TB_PREFIX + store.length + TB_SUFFIX
+      store.push(lines[i])
+      result.push(placeholder)
+    } else {
+      result.push(lines[i])
+    }
+  }
+  return result.join('\n')
+}
+
+function restoreTableLines(text: string, store: string[]): string {
+  let r = text
+  for (let i = store.length - 1; i >= 0; i--) {
+    r = r.replace(TB_PREFIX + i + TB_SUFFIX, store[i])
+  }
+  return r
+}
+
+function protectElements(text: string, store: string[]): string {
+  let r = text
+  // 1. 围栏代码块 ```...``` → CB
+  r = replaceAndStoreJS(r, /```[^\n]*\n[\s\S]*?```/g, store, CB_PREFIX)
+  // 2. 行内代码 `...` → IC
+  r = replaceAndStoreJS(r, /`[^`\n]+`/g, store, IC_PREFIX)
+  // 3. 加粗 **...** → IC（必须在斜体之前提取）
+  r = replaceAndStoreJS(r, /\*\*[^*\n]+\*\*/g, store, IC_PREFIX)
+  // 4. 斜体 *...* → IC（加粗已提取，剩余单 * 即斜体）
+  r = replaceAndStoreJS(r, /\*[^*\n]+\*/g, store, IC_PREFIX)
+  return r
+}
+
+function replaceAndStoreJS(text: string, pattern: RegExp, store: string[], prefix: string): string {
+  return text.replace(pattern, (m) => {
+    const placeholder = prefix + store.length + CB_SUFFIX
+    store.push(m)
+    return placeholder
+  })
+}
+
+function restoreElements(text: string, store: string[]): string {
+  let r = text
+  for (let i = store.length - 1; i >= 0; i--) {
+    r = r.replace(CB_PREFIX + i + CB_SUFFIX, store[i])
+    r = r.replace(IC_PREFIX + i + CB_SUFFIX, store[i])
+  }
+  return r
+}
+
+/**
+ * 表格处理：|| 拆行 + 补全分隔行
+ * 与后端 processTables / fixTableBlocks 对齐
+ */
+function processTablesJS(text: string): string {
+  let r = mergeTableFragmentsJS(text)
+  r = cleanupOrphanedDashFragmentsJS(r)
+  r = splitTableContentFromListItemsJS(r)
+  r = splitDoublePipeTablesJS(r)
+  r = fixTableBlocksJS(r)
+  r = dedupSeparatorRowsJS(r)
+  r = compactTableBlocksJS(r)
+  return r
+}
+
+function splitDoublePipeTablesJS(text: string): string {
+  if (!text.includes('||')) return text
+  const lines = text.split('\n')
+  const result: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) result.push('\n')
+    if (lines[i].includes('||')) {
+      result.push(splitSingleGluedLineJS(lines[i]))
+    } else {
+      result.push(lines[i])
+    }
+  }
+  return result.join('')
+}
+
+function splitSingleGluedLineJS(line: string): string {
+  const firstPipe = line.indexOf('|')
+  if (firstPipe < 0) return line
+
+  let prefix = ''
+  let tablePart = line
+  if (firstPipe > 0) {
+    const before = line.substring(0, firstPipe).trim()
+    if (before && !before.startsWith('|')) {
+      prefix = before + '\n'
+      tablePart = line.substring(firstPipe)
+    }
+  }
+
+  const segments = tablePart.split('||')
+  const rows: string[] = []
+
+  for (const seg of segments) {
+    let row = seg.trim()
+    if (!row) continue
+
+    // 检查尾部非表格内容
+    const trailingIdx = findTrailingContentIndexJS(row)
+    let tableRowPart = row
+    let trailingContent: string | null = null
+
+    if (trailingIdx > 0) {
+      tableRowPart = row.substring(0, trailingIdx + 1).trim()
+      trailingContent = row.substring(trailingIdx + 1).trim()
+    }
+
+    if (tableRowPart) {
+      if (!tableRowPart.startsWith('|')) tableRowPart = '|' + tableRowPart
+      if (!tableRowPart.endsWith('|')) tableRowPart = tableRowPart + '|'
+      if (isSeparatorContentJS(tableRowPart)) {
+        tableRowPart = formatSeparatorRowJS(tableRowPart)
+      } else {
+        tableRowPart = normalizeCellSpacingJS(tableRowPart)
+      }
+      rows.push(tableRowPart)
+    }
+
+    if (trailingContent) rows.push(trailingContent)
+  }
+
+  return prefix + rows.join('\n')
+}
+
+function findTrailingContentIndexJS(segment: string): number {
+  // | 后紧跟 ## 标题
+  const m1 = /\|\s*(#{1,6}\s)/.exec(segment)
+  if (m1) return m1.index
+
+  // | 后紧跟中文且后面无更多 | 且长度>30或含标点
+  const m2 = /\|\s*([\u4e00-\u9fa5])/.exec(segment)
+  if (m2) {
+    const after = segment.substring(m2.index + m2[0].length)
+    if (!after.includes('|')) {
+      const textAfter = segment.substring(m2.index + 1).trim()
+      if (/[。！？]/.test(textAfter) || textAfter.length > 30) return m2.index
+    }
+  }
+  return -1
+}
+
+function isSeparatorContentJS(row: string): boolean {
+  const trimmed = row.trim()
+  if (!trimmed.startsWith('|') || trimmed.length <= 2) return false
+  let inner = trimmed.substring(1, trimmed.endsWith('|') ? trimmed.length - 1 : trimmed.length)
+  if (!inner) return false
+  const cells = inner.split('|')
+  let hasDash = false
+  for (const cell of cells) {
+    const c = cell.trim()
+    if (!c) continue
+    if (!/^[-:]+$/.test(c)) return false
+    if (c.includes('-')) hasDash = true
+  }
+  return hasDash
+}
+
+function formatSeparatorRowJS(row: string): string {
+  const trimmed = row.trim()
+  let inner = trimmed.substring(1, trimmed.endsWith('|') ? trimmed.length - 1 : trimmed.length)
+  const cells = inner.split('|')
+  const sb: string[] = ['|']
+  for (const cell of cells) {
+    const c = cell.trim()
+    if (!c) continue
+    sb.push(' ' + c + ' |')
+  }
+  return sb.join('')
+}
+
+function normalizeCellSpacingJS(row: string): string {
+  const trimmed = row.trim()
+  let inner = trimmed.substring(1, trimmed.endsWith('|') ? trimmed.length - 1 : trimmed.length)
+  const cells = inner.split('|')
+  const sb: string[] = ['|']
+  for (const cell of cells) {
+    sb.push(' ' + cell.trim() + ' |')
+  }
+  return sb.join('')
+}
+
+/**
+ * 合并 AI 流式输出中的碎片化表格行。
+ * AI 流式输出时，分隔行 |---|---| 可能被拆成多个碎片：
+ *   |          (只有竖线)
+ *   ------|    (分隔内容碎片)
+ *   ------|    (另一个碎片)
+ * 本方法将这些碎片合并为完整的表格分隔行。
+ * 与后端 mergeTableFragments 对齐
+ */
+function mergeTableFragmentsJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i].trim()
+
+    // 检测碎片模式：一个 | 行后紧跟碎片行
+    if (line === '|') {
+      let j = i + 1
+      // 跳过空行
+      while (j < lines.length && !lines[j].trim()) j++
+      // 收集碎片
+      const fragments: string[] = []
+      while (j < lines.length && /^-+\|?$/.test(lines[j].trim())) {
+        fragments.push(lines[j].trim())
+        j++
+        // 跳过碎片之间的空行
+        while (j < lines.length && !lines[j].trim()) j++
+      }
+
+      if (fragments.length > 0) {
+        // 合并碎片为完整的分隔行
+        const separator = '|' + fragments.map(() => ' --- |').join('')
+        result.push(separator)
+        i = j
+      } else {
+        // 没有碎片，检查下一行是否是表格数据行
+        let nextNonEmpty = i + 1
+        while (nextNonEmpty < lines.length && !lines[nextNonEmpty].trim()) nextNonEmpty++
+        if (nextNonEmpty < lines.length && lines[nextNonEmpty].trim().startsWith('|') && lines[nextNonEmpty].trim().length > 1) {
+          // | 是分隔行的碎片开头，需要检查前一行是否是表格数据行
+          const prevIsTable = result.length > 0 && result[result.length - 1].trim().startsWith('|') && result[result.length - 1].trim().length > 1
+          if (prevIsTable) {
+            const colCount = countColumnsJS(result[result.length - 1])
+            result.push(buildSeparatorRowJS(colCount))
+          }
+          i = nextNonEmpty
+        } else {
+          result.push(lines[i])
+          i++
+        }
+      }
+    } else if (/^-+\|?$/.test(line)) {
+      // 独立碎片行 ------|，可能是分隔行的残留
+      const prevIsTable = result.length > 0 && result[result.length - 1].trim().startsWith('|') && result[result.length - 1].trim().length > 1
+      if (prevIsTable) {
+        i++ // 跳过碎片
+        continue
+      }
+      result.push(lines[i])
+      i++
+    } else {
+      result.push(lines[i])
+      i++
+    }
+  }
+  return result.join('\n')
+}
+
+/**
+ * 清理碎片化表格分隔行留下的孤立短横线行。
+ * 如 "--"、"-"、"------" 等不是表格行的纯短横线行。
+ * 与后端 cleanupOrphanedDashFragments 对齐
+ */
+function cleanupOrphanedDashFragmentsJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+  for (const line of lines) {
+    const trimmed = line.trim()
+    // 删除孤立的纯短横线碎片（如 "--", "-", "------"）
+    if (/^-{1,50}$/.test(trimmed) && trimmed !== '---') continue
+    // 删除孤立的短横线+管道碎片（如 "------|", "---------|"）
+    if (/^-{2,50}\|$/.test(trimmed)) continue
+    // 处理碎片粘合行：如 "---------| | IC24 | 对外 API契约 |"
+    const glueMatch = /^-{2,50}\|(.+\|.+)/.exec(trimmed)
+    if (glueMatch) {
+      const pipeIdx = trimmed.indexOf('|')
+      const afterPipe = trimmed.substring(pipeIdx + 1).trim()
+      result.push('| ' + afterPipe)
+      continue
+    }
+    // 删除表格行中的纯短横线碎片：| ------ | 等
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      const noSep = trimmed.replace(/[|\-\s:]/g, '')
+      if (!noSep && !trimmed.includes('---')) continue
+    }
+    result.push(line)
+  }
+  return result.join('\n')
+}
+
+/**
+ * 去除连续重复的分隔行。
+ * mergeTableFragments 和 fixTableBlocks 可能各生成一次分隔行，
+ * 导致连续出现多个 | --- | --- |。
+ * 与后端 dedupSeparatorRows 对齐
+ */
+function dedupSeparatorRowsJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+  let lastWasSep = false
+  for (const line of lines) {
+    const trimmed = line.trim()
+    const isSep = trimmed.startsWith('|') && trimmed.includes('---') && /^\|\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/.test(trimmed)
+    if (isSep && lastWasSep) continue
+    if (isSep) {
+      lastWasSep = true
+      // 回删分隔行后的空行
+      if (result.length > 0 && !result[result.length - 1].trim()) {
+        result.pop()
+      }
+    } else if (trimmed) {
+      lastWasSep = false
+    }
+    result.push(line)
+  }
+  return result.join('\n')
+}
+
+/**
+ * 分离表格行中粘合的列表/标题内容。
+ * AI 有时把表格最后一行和后续列表粘在一起：
+ *   | 缺点 | 扩展困难 |\u0001IC1\u0001- ✅私有构造函数
+ * 与后端 splitTableContentFromListItems 对齐
+ */
+function splitTableContentFromListItemsJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('|') && trimmed.length > 1) {
+      const splitPos = findSplitPositionJS(trimmed)
+      if (splitPos > 0 && splitPos < trimmed.length - 1) {
+        const tablePart = trimmed.substring(0, splitPos + 1) // 包含 |
+        const trailing = trimmed.substring(splitPos + 1)
+        if (countPipesJS(tablePart) >= 2) {
+          result.push(tablePart)
+          result.push('')
+          result.push(trailing.replace(/^[ \t]+/, ''))
+          continue
+        }
+      }
+      result.push(line)
+    } else {
+      result.push(line)
+    }
+  }
+  return result.join('\n')
+}
+
+/**
+ * 从右往左找到表格行中最后一个有效拆分点。
+ * 返回该 | 的索引，-1 表示无粘合内容。
+ */
+function findSplitPositionJS(line: string): number {
+  for (let pos = line.length - 1; pos >= 0; pos--) {
+    if (line[pos] !== '|') continue
+    const after = line.substring(pos + 1)
+    if (!after) continue
+    if (after.startsWith(IC_PREFIX) || after.startsWith(CB_PREFIX)
+      || after.startsWith('**') || after.startsWith('##')
+      || /^-\s*[✅❌⚠].*/.test(after) || /^-\s+\S/.test(after)) {
+      const before = line.substring(0, pos)
+      if (countPipesJS(before) >= 1) return pos
+    }
+  }
+  return -1
+}
+
+function countPipesJS(line: string): number {
+  let count = 0
+  for (const c of line) { if (c === '|') count++ }
+  return count
+}
+
+/**
+ * 压缩表格块内的空行。
+ * 表格行之间不应有空行，否则 Markdown 渲染器不识别为表格。
+ * 与后端 compactTableBlocks 对齐
+ */
+function compactTableBlocksJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim()
+    // 如果当前行是空行，检查前后是否都是表格行
+    if (!trimmed && result.length > 0) {
+      const prev = result[result.length - 1].trim()
+      const next = (i + 1 < lines.length) ? lines[i + 1].trim() : ''
+      if (prev.startsWith('|') && prev.endsWith('|') && next.startsWith('|') && next.endsWith('|')) {
+        continue // 跳过表格行之间的空行
+      }
+    }
+    result.push(lines[i])
+  }
+  return result.join('\n')
+}
+
+function fixTableBlocksJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    if (isTableRowJS(lines[i])) {
+      const tableRows: string[] = []
+      while (i < lines.length && isTableRowJS(lines[i])) {
+        tableRows.push(lines[i])
+        i++
+      }
+      result.push(...fixSingleTableJS(tableRows))
+    } else {
+      result.push(lines[i])
+      i++
+    }
+  }
+  return result.join('\n')
+}
+
+function isTableRowJS(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.startsWith('|') && trimmed.length > 1
+}
+
+function fixSingleTableJS(rows: string[]): string[] {
+  if (rows.length === 0) return rows
+  if (isSeparatorContentJS(rows[0])) return rows
+
+  const colCount = countColumnsJS(rows[0])
+  const fixed: string[] = []
+
+  for (let j = 0; j < rows.length; j++) {
+    const row = rows[j]
+    if (isSeparatorContentJS(row)) {
+      const sepCols = countColumnsJS(row)
+      if (sepCols !== colCount) {
+        fixed.push(buildSeparatorRowJS(colCount))
+      } else {
+        fixed.push(formatSeparatorRowJS(row))
+      }
+    } else {
+      // 所有数据行都做 normalizeCellSpacingJS（确保 | 属性 | 值 | 格式）
+      let r = row.trim()
+      if (!r.startsWith('|')) r = '|' + r
+      if (!r.endsWith('|')) r = r + '|'
+      r = normalizeCellSpacingJS(r)
+      fixed.push(r)
+      if (j === 0) {
+        const nextIsSep = (j + 1 < rows.length) && isSeparatorContentJS(rows[j + 1])
+        if (!nextIsSep) fixed.push(buildSeparatorRowJS(colCount))
+      }
+    }
+  }
+  return fixed
+}
+
+function countColumnsJS(row: string): number {
+  const trimmed = row.trim()
+  if (!trimmed.startsWith('|')) return 0
+  let inner = trimmed
+  if (inner.startsWith('|')) inner = inner.substring(1)
+  if (inner.endsWith('|')) inner = inner.substring(0, inner.length - 1)
+  return inner.split('|').length
+}
+
+function buildSeparatorRowJS(colCount: number): string {
+  const cells: string[] = []
+  for (let c = 0; c < colCount; c++) cells.push(' --- ')
+  return '|' + cells.join('|') + '|'
+}
+
+/**
+ * 对 Markdown 展示块 (```markdown ... ```) 内容做二次归一化
+ * 与后端 normalizeMarkdownShowcaseBlocks 对齐
+ */
+function normalizeMarkdownShowcaseBlocksJS(text: string): string {
+  return text.replace(/(```(?:markdown|md)\n?)([\s\S]*?)(```)/g, (_m, opening, inner, closing) => {
+    return opening + normalizeMarkdown(inner) + closing
+  })
+}
+
+/**
+ * 空行修复：确保标题/列表/表格/代码块前后有空行
+ * 与后端 ensureBlankLines 对齐
+ */
+function ensureBlankLinesJS(text: string): string {
+  const lines = text.split('\n')
+  const result: string[] = []
+
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) {
+      const prev = lines[i - 1].replace(/[ \t]+$/, '')
+      const curr = lines[i].replace(/[ \t]+$/, '')
+
+      if (!prev) {
+        result.push(lines[i])
+        continue
+      }
+
+      let needBlank = false
+
+      if (/^#{1,6}\s/.test(curr) && !/^#{1,6}\s/.test(prev)) needBlank = true
+      if (/^#{1,6}\s/.test(prev) && !/^#{1,6}\s/.test(curr) && curr && !curr.startsWith('|') && !isSeparatorContentJS(curr)) needBlank = true
+      if (/^\d+\.\s/.test(curr) && !/^\d+\.\s/.test(prev)) needBlank = true
+      if (/^[\-*+]\s/.test(curr) && !/^[\-*+]\s/.test(prev)) needBlank = true
+      if (curr.startsWith('|') && !prev.startsWith('|')) needBlank = true
+      if (prev.startsWith('|') && !curr.startsWith('|') && curr) needBlank = true
+      if (curr.startsWith(CB_PREFIX) && !prev.startsWith(CB_PREFIX)) needBlank = true
+      if (prev.endsWith(CB_SUFFIX) && !curr.startsWith(CB_PREFIX) && curr) needBlank = true
+
+      if (needBlank) result.push('')
+    }
+    result.push(lines[i])
+  }
+  return result.join('\n')
+}
+
+/**
+ * 完整的 Markdown 归一化函数
+ * 与后端 MarkdownNormalizer.normalize() 规则对齐
+ * 用于前端流式阶段的文本处理
+ */
+function normalizeMarkdown(text: string): string {
+  if (!text) return text
+
+  // ═══ 阶段 0：保护代码块和行内元素 ═══
+  const store: string[] = []
+  let r = protectElements(text, store)
+
+  // ═══ 阶段 1：表格处理（必须在断行修复之前） ═══
+  // 碎片合并 + 孤立短横线清理 + 表格尾部粘合拆分 + || 拆行 + 分隔行修复 + 去重 + 压缩空行
+  r = processTablesJS(r)
+
+  // ═══ 阶段 1.5：保护表格行——避免被后续列表规则误匹配 ═══
+  const tableStore: string[] = []
+  r = protectTableLines(r, tableStore)
+
+  // ═══ 阶段 2：断行修复 ═══
+  // 2a. ## 后补空格
+  r = r.replace(/(#{2,6})([^\s#])/g, '$1 $2')
+  r = r.replace(/(^|\n)(#)([^\s#])/g, '$1$2 $3')
+
+  // 2b. 标题标记前断行+空行
+  r = r.replace(/([^\n\s#])(#{1,6}\s)/g, '$1\n\n$2')
+
+  // 2d. 标题后紧跟表格标记 → 断行
+  r = r.replace(/(#{1,6}\s[^\n|]+)(\|)/g, '$1\n\n$2')
+
+  // 2d2. 标题后紧跟代码块占位符 → 断行
+  r = r.replace(/(#{1,6}\s[^\n\u0001]+)(\u0001CB)/g, '$1\n\n$2')
+
+  // 2f0. 有序列表标记后补空格
+  r = r.replace(/(\d{1,2})\.([^\s\d\n.])/g, '$1. $2')
+
+  // 2h0. 无序列表标记后补空格（中文场景）
+  r = r.replace(/([-*+])([\u4e00-\u9fa5])/g, '$1 $2')
+  // 2h0-en. 列表标记后紧跟英文大写字母也补空格（类名/文件名通常大写开头）
+  r = r.replace(/([-*+])([A-Z])/g, '$1 $2')
+  // 2h0-en2. 列表标记后紧跟小写字母+中文混合内容时补空格（排除纯英文连字符如 self-contained）
+  r = r.replace(/([-*+])([a-z]+)([\u4e00-\u9fa5])/g, '$1 $2$3')
+  // 2h0-ext. 列表标记后紧跟 IC 占位符也补空格
+  r = r.replace(/([-*+])(\u0001IC)/g, '$1 $2')
+
+  // 2h1. 中文字符与数字之间补空格
+  r = r.replace(/([\u4e00-\u9fa5])(\d)/g, '$1 $2')
+  r = r.replace(/(?<!-)(\d)([\u4e00-\u9fa5])/g, '$1 $2')
+
+  // 2f. 有序列表前断行
+  r = r.replace(/([^\n\d\s.])(1\.\s)/g, '$1\n$2')
+
+  // 2g. 有序列表项之间断行
+  r = r.replace(/([^\n\d.#\s])(\d{1,2}\.\s)/g, '$1\n$2')
+
+  // 2h. 无序列表前断行
+  r = r.replace(/([^\n\s])([-*+]\s)/g, '$1\n$2')
+
+  // 2i. 树形符号前断行
+  r = r.replace(/([^\n])(├──|└──)/g, '$1\n$2')
+
+  // 2j. 代码块占位符前断行
+  r = r.replace(/([^\n\u0001])(\u0001CB)/g, '$1\n$2')
+
+  // 2k. 代码块占位符后断行
+  r = r.replace(/(\u0001CB\d+\u0001)([^\n\u0001])/g, '$1\n$2')
+
+  // 阶段 2.5：断行后新暴露的表格行修复
+  r = fixTableBlocksJS(r)
+
+  // 阶段 3：空行修复
+  r = ensureBlankLinesJS(r)
+
+  // 阶段 4：清理
+  r = r.replace(/\n{3,}/g, '\n\n')
+  r = r.replace(/[ \t]+\n/g, '\n')
+  r = r.replace(/^\s+/, '').replace(/\s+$/, '')
+
+  // 阶段 5：恢复代码块和行内元素
+  r = restoreElements(r, store)
+
+  // 阶段 5.5：恢复被保护的表格行
+  r = restoreTableLines(r, tableStore)
+
+  // 阶段 6：Markdown 展示块二次归一化
+  r = normalizeMarkdownShowcaseBlocksJS(r)
+
+  // 阶段 7：压缩表格块内空行（必须在最后，因为前面的规则可能插入空行）
+  r = compactTableBlocksJS(r)
+
+  return r
+}
 
 /**
  * 兜底 Markdown 清理
  * 1. 保护代码块
  * 2. ** text ** → **text**（加粗标记内空格清理）
  * 3. 连续 3+ 空行 → 2 空行
+ *
+ * ⚠️ 此函数已升级为完整归一化（与后端 MarkdownNormalizer 对齐），
+ *    名称 cleanMarkdown 保持不变以兼容现有调用点
  */
-function cleanBoldSpaces(text: string): string {
-  if (!text || !text.includes('**')) return text
-  const sb: string[] = []
-  let i = 0
-  let inBold = false
-  while (i < text.length) {
-    if (i + 1 < text.length && text[i] === '*' && text[i + 1] === '*') {
-      if (!inBold) {
-        // 开标签 **：跳过后续空格
-        sb.push('**')
-        i += 2
-        while (i < text.length && (text[i] === ' ' || text[i] === '\t')) i++
-        inBold = true
-      } else {
-        // 闭标签 **：移除已累积的尾部空格
-        while (sb.length > 0 && (sb[sb.length - 1] === ' ' || sb[sb.length - 1] === '\t')) sb.pop()
-        sb.push('**')
-        i += 2
-        inBold = false
-      }
-    } else {
-      sb.push(text[i])
-      i++
-    }
-  }
-  return sb.join('')
-}
-
+// cleanMarkdown 已升级为完整归一化（与后端 MarkdownNormalizer.normalize() 对齐）
+// 流式阶段前端做同样的归一化，确保渲染一致
 function cleanMarkdown(text: string): string {
-  if (!text) return text
-  // 保护代码块
-  const codeBlocks: string[] = []
-  let result = text.replace(/```[\s\S]*?```/g, (m) => {
-    codeBlocks.push(m)
-    return `\x00CB${codeBlocks.length - 1}\x00`
-  })
-  // 加粗标记空格清理（状态机，成对处理）
-  result = cleanBoldSpaces(result)
-  // 连续 3+ 空行 → 2 空行
-  result = result.replace(/\n{3,}/g, '\n\n')
-  // 还原代码块
-  result = result.replace(/\x00CB(\d+)\x00/g, (_m, idx: string) => codeBlocks[parseInt(idx)])
-  return result
+  return normalizeMarkdown(text)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -373,6 +964,8 @@ export function MarkdownContent({ content, colors, isUser }: { content: string; 
           <div className="overflow-x-auto"><table className="my-2 w-full max-w-full text-[11px] border-collapse table-fixed" style={{ border: `1px solid ${colors.border}` }}>{children}</table></div>
         ),
         thead: ({ children }: { children?: React.ReactNode }) => <thead style={{ backgroundColor: colors.bgSecondary }}>{children}</thead>,
+        tbody: ({ children }: { children?: React.ReactNode }) => <tbody>{children}</tbody>,
+        tr: ({ children }: { children?: React.ReactNode }) => <tr>{children}</tr>,
         th: ({ children }: { children?: React.ReactNode }) => <th className="px-2 py-1 text-left font-semibold border" style={{ borderColor: colors.border, color: textColor }}>{children}</th>,
         td: ({ children }: { children?: React.ReactNode }) => <td className="px-2 py-1 border" style={{ borderColor: colors.border, color: textColor }}>{children}</td>,
         strong: ({ children }: { children?: React.ReactNode }) => <strong className="font-bold" style={{ color: textColor }}>{children}</strong>,
