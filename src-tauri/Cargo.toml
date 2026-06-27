@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+default-run = "walissh-client"
+
+[[bin]]
+name = "walicode-cli"
+path = "src/bin/walicode-cli.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -37,4 +42,12 @@ axum = "0.7"
 async-stream = "0.3"
 futures = "0.3"
 log = "0.4"
+# CLI 终端模式
+ratatui = "0.29"
+crossterm = "0.28"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+unicode-width = "0.2"
+syntect = "5"
 

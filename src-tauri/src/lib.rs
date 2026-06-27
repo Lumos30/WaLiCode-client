@@ -1,4 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod cli_register;
 mod local_pty;
 mod shell_exec;
 mod local_http_server;
@@ -38,6 +39,10 @@ pub fn run() {
             shell_exec::list_stream_shells,
             // 本地 Server 信息
             local_http_server::get_local_server_port,
+            // 命令行工具注册
+            cli_register::install_cli_command,
+            cli_register::uninstall_cli_command,
+            cli_register::check_cli_installed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

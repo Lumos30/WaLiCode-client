@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useThemeStore, themes, type ThemeName } from '../stores/themeStore'
 import { useConnectionStore } from '../stores/connectionStore'
+import { invoke } from '@tauri-apps/api/core'
 
 interface SettingsProps {
   open: boolean
@@ -20,6 +21,8 @@ export function Settings({ open, onClose }: SettingsProps) {
   const [inputFontSize, setInputFontSize] = useState(13)
   const [section, setSection] = useState<Section>('general')
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle')
+  const [cliInstalled, setCliInstalled] = useState(false)
+  const [cliLoading, setCliLoading] = useState<'idle' | 'installing' | 'uninstalling'>('idle')
 
   // ── 可拖拽缩放 ──
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -29,6 +32,11 @@ export function Settings({ open, onClose }: SettingsProps) {
 
   // 同步 store → 本地
   useEffect(() => { setInputUrl(serverUrl) }, [serverUrl])
+
+  // 检查 CLI 注册状态
+  useEffect(() => {
+    invoke<boolean>('check_cli_installed').then(setCliInstalled).catch(() => setCliInstalled(false))
+  }, [])
 
   // ── 判断是否有修改 ──
   const hasChanges = inputUrl.trim().replace(/\/+$/, '') !== serverUrl
@@ -213,6 +221,65 @@ export function Settings({ open, onClose }: SettingsProps) {
                     <option>简体中文</option>
                     <option>English</option>
                   </select>
+                </div>
+
+                {/* 命令行工具注册 */}
+                <div>
+                  <label className="block text-[13px] mb-2" style={{ color: colors.textDim }}>命令行工具</label>
+                  <div className="flex items-center gap-3">
+                    {cliInstalled ? (
+                      <>
+                        <span className="text-[13px]" style={{ color: colors.green }}>✓ walicode-cli 命令已注册</span>
+                        <button
+                          onClick={async () => {
+                            setCliLoading('uninstalling')
+                            try {
+                              await invoke<string>('uninstall_cli_command')
+                              setCliInstalled(false)
+                            } catch (e) {
+                              alert(`移除失败: ${e}。可能需要管理员权限。`)
+                            }
+                            setCliLoading('idle')
+                          }}
+                          disabled={cliLoading !== 'idle'}
+                          className="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                          style={{
+                            backgroundColor: colors.bgTertiary,
+                            border: `1px solid ${colors.border}`,
+                            color: colors.textSecondary,
+                            cursor: cliLoading !== 'idle' ? 'not-allowed' : 'pointer',
+                          }}
+                        >
+                          移除
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          setCliLoading('installing')
+                          try {
+                            await invoke<string>('install_cli_command')
+                            setCliInstalled(true)
+                          } catch (e) {
+                            alert(`注册失败: ${e}。可能需要管理员权限。`)
+                          }
+                          setCliLoading('idle')
+                        }}
+                        disabled={cliLoading !== 'idle'}
+                        className="px-4 py-2 rounded-md text-[13px] font-medium transition-colors"
+                        style={{
+                          backgroundColor: cliLoading === 'idle' ? colors.accent : colors.bgTertiary,
+                          color: cliLoading === 'idle' ? '#fff' : colors.textDim,
+                          cursor: cliLoading !== 'idle' ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {cliLoading === 'installing' ? '注册中...' : '注册 walicode-cli 命令到 PATH'}
+                      </button>
+                    )}
+                  </div>
+                  <p className="mt-1.5 text-[12px]" style={{ color: colors.textDim }}>
+                    注册后可在终端输入 <code className="px-1 py-0.5 rounded text-[11px]" style={{ backgroundColor: colors.bgInput, color: colors.accent }}>walicode-cli</code> 直接启动应用
+                  </p>
                 </div>
               </div>
             )}
