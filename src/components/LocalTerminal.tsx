@@ -399,8 +399,8 @@ export function LocalTerminal({
       </div>
 
       {/* 终端容器 */}
-      <div className="flex-1 overflow-hidden" style={{ position: 'relative' }}>
-        <div ref={wrapperRef} className="absolute inset-0" />
+      <div className="flex-1" style={{ position: 'relative', overflow: 'hidden' }}>
+        <div ref={wrapperRef} className="absolute inset-0" style={{ overflow: 'hidden' }} />
       </div>
 
       {/* 右键菜单 */}

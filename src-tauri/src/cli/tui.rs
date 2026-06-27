@@ -17,14 +17,13 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::io::{self, Read};
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// 检查 stdin 是否为 TTY（终端）
@@ -33,57 +32,49 @@ fn is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
-/// 主题颜色配置（OpenCode 风格 - 高对比度）
+/// 主题颜色配置（高对比度 ANSI 16 色 - 确保所有终端兼容）
 mod theme {
     use ratatui::style::Color;
 
-    // 背景色
-    pub const BG: Color = Color::Rgb(245, 245, 245);           // 浅灰背景
-    pub const BG_DARK: Color = Color::Rgb(230, 230, 230);      // 稍深背景
-    pub const BG_INPUT: Color = Color::Rgb(255, 255, 255);     // 输入框背景
+    // 背景色 - 使用 ANSI 16 色确保兼容性
+    pub const BG_DARK: Color = Color::Black;               // 深色背景
+    pub const BG_INPUT: Color = Color::Rgb(40, 40, 40);    // 输入区背景（保留 RGB 但较暗）
     
-    // 文字色 - 加深对比度
-    pub const FG: Color = Color::Rgb(30, 30, 30);              // 主文字色（加深）
-    pub const FG_DIM: Color = Color::Rgb(80, 80, 80);          // 次要文字（加深）
-    pub const FG_MUTED: Color = Color::Rgb(120, 120, 120);     // 更淡的文字（加深）
-    pub const FG_PLACEHOLDER: Color = Color::Rgb(160, 160, 160); // placeholder
+    // 文字色 - 高对比度 ANSI 色
+    pub const FG: Color = Color::White;                    // 主文字色（纯白）
+    pub const FG_DIM: Color = Color::DarkGray;             // 次要文字（深灰）
+    pub const FG_MUTED: Color = Color::Gray;               // 更淡的文字
+    pub const FG_PLACEHOLDER: Color = Color::Gray;         // placeholder
     
-    // 边框色
-    pub const BORDER: Color = Color::Rgb(200, 200, 200);       // 边框色
-    pub const BORDER_FOCUS: Color = Color::Rgb(60, 120, 180);  // 聚焦边框
+    // 边框色 - ANSI 色
+    pub const BORDER: Color = Color::DarkGray;             // 边框色
+    pub const BORDER_FOCUS: Color = Color::Cyan;           // 聚焦边框（青色）
     
-    // 消息气泡
-    pub const USER_BG: Color = Color::Rgb(235, 245, 255);      // 用户消息背景
-    pub const USER_BORDER: Color = Color::Rgb(60, 120, 180);   // 用户消息边框
-    pub const AI_BG: Color = Color::Rgb(255, 255, 255);        // AI 消息背景
-    pub const AI_BORDER: Color = Color::Rgb(180, 180, 180);    // AI 消息边框
+    // 消息气泡 - 使用 ANSI 色
+    pub const AI_BORDER: Color = Color::DarkGray;          // AI 消息边框（灰色）
     
-    // 强调色 - OpenCode 风格彩色
-    pub const ACCENT: Color = Color::Rgb(60, 140, 60);         // 强调色（绿色）
-    pub const ACCENT_BLUE: Color = Color::Rgb(40, 100, 160);   // 蓝色强调
-    pub const ACCENT_PURPLE: Color = Color::Rgb(100, 60, 140); // 紫色强调
-    pub const ERROR: Color = Color::Rgb(180, 60, 60);          // 错误红
-    pub const WARNING: Color = Color::Rgb(180, 140, 40);       // 警告黄
-    pub const SUCCESS: Color = Color::Rgb(40, 140, 40);        // 成功绿
-    pub const TIP: Color = Color::Rgb(180, 120, 40);           // Tips 橙色
+    // 强调色 - ANSI 16 色
+    pub const ACCENT: Color = Color::Green;                // 强调色（绿色）
+    pub const ACCENT_BLUE: Color = Color::Cyan;            // 蓝色强调
+    pub const ACCENT_PURPLE: Color = Color::Magenta;       // 紫色强调
+    pub const ERROR: Color = Color::Red;                   // 错误红
+    pub const WARNING: Color = Color::Yellow;              // 警告黄
+    pub const SUCCESS: Color = Color::Green;               // 成功绿
+    pub const TIP: Color = Color::Yellow;                  // Tips 橙色
     
-    // OpenCode 风格列表颜色
-    pub const LIST_ORANGE: Color = Color::Rgb(200, 120, 40);   // + Thought 橙色
-    pub const LIST_BLUE: Color = Color::Rgb(60, 120, 200);     // - 列表项蓝色
-    pub const LIST_GREEN: Color = Color::Rgb(60, 160, 80);     // 绿色列表项
-    pub const LIST_PURPLE: Color = Color::Rgb(140, 80, 180);   // 紫色列表项
-}
+    // 列表颜色 - ANSI 色
+    pub const LIST_ORANGE: Color = Color::Yellow;          // + Thought
+    pub const LIST_BLUE: Color = Color::Cyan;              // - 列表项
+    pub const LIST_GREEN: Color = Color::Green;            // 绿色列表项
+    pub const LIST_PURPLE: Color = Color::Magenta;         // 紫色列表项
+    
+    // 输入区专用
+    pub const INPUT_PROMPT: Color = Color::Green;          // 输入提示符
+    pub const INPUT_CURSOR: Color = Color::Cyan;           // 光标
+} // end mod theme
+
 
 /// WaLiCode Logo - 像素风格 ASCII Art（WALI 加粗黑色，CODE 彩色）
-const LOGO: &str = r#"
-██╗    ██╗ █████╗ ██╗     ██╗ ██████╗ ██████╗ ██████╗ 
-██║    ██║██╔══██╗██║     ██║██╔════╝██╔═══██╗██╔══██╗
-██║ █╗ ██║███████║██║     ██║██║     ██║   ██║██║  ██║
-██║███╗██║██╔══██║██║     ██║██║     ██║   ██║██║  ██║
-╚███╔███╔╝██║  ██║███████╗██║╚██████╗╚██████╔╝██████╔╝
- ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ 
-"#;
-
 /// 运行 CLI 模式
 pub async fn run_cli(args: CliArgs) {
     // 非交互模式：一条消息直接执行
@@ -369,8 +360,7 @@ fn render_welcome(f: &mut Frame, app: &App) {
         .alignment(Alignment::Center);
     f.render_widget(logo, v_chunks[1]);
 
-    // 2. 输入框区域（OpenCode 风格 - 左侧紫色竖线 + 白色背景卡片）
-    // 使用固定宽度居中，高度占满 v_chunks[2]
+    // 2. 输入框区域（OpenCode 风格 - 底部独立输入栏）
     let input_width = (size.width as f32 * 0.75) as u16;
     let input_x = (size.width.saturating_sub(input_width)) / 2;
     let input_area = Rect {
@@ -380,21 +370,12 @@ fn render_welcome(f: &mut Frame, app: &App) {
         height: v_chunks[2].height,
     };
     
-    // 白色背景卡片
+    // 深色背景卡片 + 边框
     let input_card = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_FOCUS))
         .style(Style::default().bg(theme::BG_INPUT));
     f.render_widget(input_card, input_area);
-    
-    // 左侧紫色竖线
-    let left_bar_area = Rect {
-        x: input_area.x,
-        y: input_area.y,
-        width: 1,
-        height: input_area.height,
-    };
-    let left_bar = Paragraph::new(" ")
-        .style(Style::default().bg(theme::ACCENT_PURPLE));
-    f.render_widget(left_bar, left_bar_area);
     
     // 输入框内容区域
     let input_content_area = Rect {
@@ -404,33 +385,40 @@ fn render_welcome(f: &mut Frame, app: &App) {
         height: input_area.height.saturating_sub(2),
     };
     
-    // 输入框内容（可输入，带光标）
-    let input_lines = if app.input.is_empty() {
-        // Placeholder 模式 - 添加操作提示
+    // 输入框内容（多行输入支持）
+    let input_text = app.get_input_text();
+    let input_lines: Vec<Line> = if input_text.is_empty() {
+        // Placeholder 模式
         vec![
             Line::from(vec![
-                Span::styled("💬 ", Style::default()),
-                Span::styled("输入问题进行提问，按 Enter 发送", 
+                Span::styled("💬 ", Style::default().fg(theme::INPUT_PROMPT)),
+                Span::styled("输入问题进行提问，按 Enter 发送，Shift+Enter 换行", 
                     Style::default().fg(theme::FG_PLACEHOLDER).add_modifier(Modifier::ITALIC)),
-            ]),
-            Line::from(vec![
-                Span::styled("   例如：\"帮我看看项目结构\" 或 \"如何部署这个服务？\"", 
-                    Style::default().fg(theme::FG_MUTED).add_modifier(Modifier::ITALIC)),
             ]),
         ]
     } else {
-        // 输入中模式（显示用户输入 + 闪烁光标）
-        vec![
-            Line::from(vec![
-                Span::styled("💬 ", Style::default()),
-                Span::styled(app.input.clone(), Style::default().fg(theme::FG)),
-                Span::styled("▎", Style::default().fg(theme::ACCENT_PURPLE)),
-            ]),
-            Line::from(vec![
-                Span::styled("   按 Enter 发送，Esc 取消", 
-                    Style::default().fg(theme::FG_MUTED).add_modifier(Modifier::ITALIC)),
-            ]),
-        ]
+        // 显示多行输入内容 + 光标
+        let mut lines = Vec::new();
+        for (i, line) in app.input_lines.iter().enumerate() {
+            let (cursor_line, cursor_col) = app.cursor_pos;
+            let mut spans = vec![
+                Span::styled("│ ", Style::default().fg(theme::BORDER)),
+            ];
+            
+            if i == cursor_line {
+                // 在当前行显示光标（按字符位置切片，处理 UTF-8 多字节字符）
+                let col = cursor_col.min(line.chars().count());
+                let before: String = line.chars().take(col).collect();
+                let after: String = line.chars().skip(col).collect();
+                spans.push(Span::styled(before, Style::default().fg(theme::FG)));
+                spans.push(Span::styled("▎", Style::default().fg(theme::INPUT_CURSOR)));
+                spans.push(Span::styled(after, Style::default().fg(theme::FG)));
+            } else {
+                spans.push(Span::styled(line.clone(), Style::default().fg(theme::FG)));
+            }
+            lines.push(Line::from(spans));
+        }
+        lines
     };
     
     let input_widget = Paragraph::new(input_lines)
@@ -463,18 +451,46 @@ fn render_welcome(f: &mut Frame, app: &App) {
     f.render_widget(tip, v_chunks[4]);
 }
 
-/// 处理欢迎界面的键盘事件
+/// 处理欢迎界面的键盘事件（支持多行输入 + 输入历史）
 /// 返回 true 表示应该切换到聊天界面
-fn handle_welcome_key(app: &mut App, key: KeyEvent, sse: &SseClient, event_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
+fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
     // Ctrl+C 退出
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
         return false;
     }
 
+    // Ctrl+U 清空输入
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
+        app.clear_input();
+        return false;
+    }
+
+    // ↑ 输入历史导航
+    if key.code == KeyCode::Up && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(prev) = app.input_history.navigate_up(&app.get_input_text()) {
+            app.set_input_text(prev);
+        }
+        return false;
+    }
+
+    // ↓ 输入历史导航
+    if key.code == KeyCode::Down && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        if let Some(next) = app.input_history.navigate_down() {
+            app.set_input_text(next);
+        }
+        return false;
+    }
+
+    // Shift+Enter 换行
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.insert_newline();
+        return false;
+    }
+
     // Enter 发送消息并进入聊天界面
     if key.code == KeyCode::Enter {
-        let text = app.input.trim().to_string();
+        let text = app.get_input_text().trim().to_string();
         if text.is_empty() {
             return false;
         }
@@ -482,7 +498,7 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, sse: &SseClient, event_tx: &
         // 检查是否是斜杠命令
         if text.starts_with('/') {
             if app.handle_slash_command(&text) {
-                app.input.clear();
+                app.clear_input();
                 return false;
             }
         }
@@ -540,31 +556,49 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, sse: &SseClient, event_tx: &
 
     // 退格删除
     if key.code == KeyCode::Backspace {
-        app.input.pop();
+        app.backspace();
         return false;
     }
 
-    // Ctrl+U 清空输入
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-        app.input.clear();
+    // Delete 删除
+    if key.code == KeyCode::Delete {
+        app.delete_char();
+        return false;
+    }
+
+    // 方向键
+    if key.code == KeyCode::Left {
+        app.cursor_left();
+        return false;
+    }
+    if key.code == KeyCode::Right {
+        app.cursor_right();
+        return false;
+    }
+
+    // Home/End
+    if key.code == KeyCode::Home {
+        app.cursor_home();
+        return false;
+    }
+    if key.code == KeyCode::End {
+        app.cursor_end();
         return false;
     }
 
     // Tab 切换 agent（示例功能）
     if key.code == KeyCode::Tab {
-        // 可以在这里实现 agent 切换逻辑
         return false;
     }
 
-    // Ctrl+P 打开命令面板（示例功能）
+    // Ctrl+P 打开命令面板
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
-        // 可以在这里实现命令面板
         return false;
     }
 
     // 字符输入
     if let KeyCode::Char(c) = key.code {
-        app.input.push(c);
+        app.insert_char(c);
     }
 
     false
@@ -574,123 +608,72 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, sse: &SseClient, event_tx: &
 //  命令窗口渲染（聊天界面）
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// 渲染聊天界面（OpenCode 风格分栏布局）
+/// 渲染聊天界面（OpenCode 风格 - 深色主题 + 底部独立输入栏）
 fn render_chat(f: &mut Frame, app: &App) {
     let size = f.area();
 
     // 整体布局：Header + Main（Messages | Context）+ Hint + Input
+    // 输入区高度动态调整：流式时固定 3 行，普通时根据多行输入自适应
+    // 固定布局：Header(1) + Messages(自适应) + Status(1) + Input(3) + Footer(1)
     let main_chunks = Layout::vertical([
-        Constraint::Length(1),  // Header
-        Constraint::Min(5),     // Main content
-        Constraint::Length(1),  // Hint
-        Constraint::Length(3),  // Input
+        Constraint::Length(1),   // Header
+        Constraint::Min(5),      // Messages
+        Constraint::Length(1),   // Status bar
+        Constraint::Length(3),   // Input (固定 3 行)
+        Constraint::Length(1),   // Footer
     ]).split(size);
 
     render_header(f, main_chunks[0], app);
-    render_main_content(f, main_chunks[1], app);
-    render_hint(f, main_chunks[2], app);
+    render_messages(f, main_chunks[1], app);
+    render_status_bar(f, main_chunks[2], app);
     render_input(f, main_chunks[3], app);
+    render_footer(f, main_chunks[4], app);
 }
 
-/// 渲染主内容区（左侧消息 + 右侧 Context）
-fn render_main_content(f: &mut Frame, area: Rect, app: &App) {
-    let chunks = Layout::horizontal([
-        Constraint::Percentage(70),  // 消息区域
-        Constraint::Percentage(30),  // Context 面板
-    ]).split(area);
-
-    render_messages(f, chunks[0], app);
-    render_context_panel(f, chunks[1], app);
-}
-
-/// 渲染 Context 面板（右侧 - 简化版）
-fn render_context_panel(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .title(" Context ")
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme::BORDER))
-        .style(Style::default().bg(theme::BG));
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let mut lines: Vec<Line> = vec![];
-    
-    // Session 信息（简化）
-    lines.push(Line::from(vec![
-        Span::styled("New session", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-    ]));
-    let session_display = app.session_id.as_ref()
-        .map(|s| if s.len() > 20 { format!("{}...", &s[..20]) } else { s.clone() })
-        .unwrap_or_else(|| "unknown".to_string());
-    lines.push(Line::from(vec![
-        Span::styled(session_display, Style::default().fg(theme::FG_MUTED)),
-    ]));
-    lines.push(Line::from(""));
-    
-    // 快捷命令（实际有用的内容）
-    lines.push(Line::from(vec![
-        Span::styled("◆ 快捷命令", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("/help", Style::default().fg(theme::ACCENT_BLUE)),
-        Span::styled(" 查看帮助", Style::default().fg(theme::FG_DIM)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("/clear", Style::default().fg(theme::ACCENT_BLUE)),
-        Span::styled(" 清空会话", Style::default().fg(theme::FG_DIM)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled("/agent", Style::default().fg(theme::ACCENT_BLUE)),
-        Span::styled(" 切换 Agent", Style::default().fg(theme::FG_DIM)),
-    ]));
-    lines.push(Line::from(""));
-    
-    // Agent 信息
-    lines.push(Line::from(vec![
-        Span::styled("◆ Agent", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-    ]));
-    lines.push(Line::from(vec![
-        Span::styled(&app.agent_id, Style::default().fg(theme::ACCENT)),
-    ]));
-    lines.push(Line::from(""));
-    
-    // 状态
-    lines.push(Line::from(vec![
-        Span::styled("◆ 状态", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-    ]));
-    let status = if app.is_streaming {
-        Span::styled("● 思考中", Style::default().fg(theme::WARNING))
+/// 渲染状态栏（流式状态 + 快捷键提示 - OpenCode 风格分隔线）
+fn render_status_bar(f: &mut Frame, area: Rect, app: &App) {
+    let status_text = if app.is_streaming {
+        Line::from(vec![
+            Span::styled(" ● 思考中", Style::default().fg(theme::WARNING).add_modifier(Modifier::BOLD)),
+            Span::styled(" ─ Esc 取消 ─ /help 帮助", Style::default().fg(theme::FG_DIM)),
+        ])
+    } else if app.manual_scroll {
+        Line::from(vec![
+            Span::styled(" ↑ 手动滚动", Style::default().fg(theme::ACCENT_BLUE).add_modifier(Modifier::BOLD)),
+            Span::styled(" ─ Esc 回底 ─ PgUp/PgDn 滚动", Style::default().fg(theme::FG_DIM)),
+        ])
     } else {
-        Span::styled("● 就绪", Style::default().fg(theme::SUCCESS))
+        Line::from(vec![
+            Span::styled(" ● 就绪", Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
+            Span::styled(" ─ Enter 发送 ─ Shift+Enter 换行 ─ /help 帮助", Style::default().fg(theme::FG_DIM)),
+        ])
     };
-    lines.push(Line::from(vec![status]));
-
-    let context = Paragraph::new(lines)
-        .wrap(Wrap { trim: false });
-    f.render_widget(context, inner);
+    let status = Paragraph::new(status_text);
+    f.render_widget(status, area);
 }
 
-/// 渲染 Header（单行简洁风格）
+/// 渲染标题栏（简洁单行 - OpenCode 风格）
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let session_short = app.session_id.as_ref()
-        .map(|s| if s.len() > 8 { format!("{}...", &s[..8]) } else { s.clone() })
-        .unwrap_or_else(|| "未连接".to_string());
+        .map(|s| if s.len() > 12 { format!("{}...", &s[..12]) } else { s.clone() })
+        .unwrap_or_else(|| "no session".to_string());
 
+    let project_name = app.workdir.as_ref()
+        .and_then(|d| d.split('/').last())
+        .unwrap_or("unknown");
+
+    // OpenCode 风格头部：● project │ Agent │ Session
     let header_text = Line::from(vec![
-        Span::styled(" WaLiCode ", Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
-        Span::styled("v0.1.0", Style::default().fg(theme::FG_MUTED)),
-        Span::raw(" │ "),
-        Span::styled("Agent: ", Style::default().fg(theme::FG_DIM)),
-        Span::styled(&app.agent_id, Style::default().fg(theme::ACCENT_BLUE).add_modifier(Modifier::BOLD)),
-        Span::raw(" │ "),
-        Span::styled("Session: ", Style::default().fg(theme::FG_DIM)),
-        Span::styled(session_short, Style::default().fg(theme::FG_DIM)),
+        Span::styled("● ", Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD)),
+        Span::styled(project_name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+        Span::styled(" │ ", Style::default().fg(theme::FG_DIM)),
+        Span::styled(&app.agent_id, Style::default().fg(theme::ACCENT_BLUE)),
+        Span::styled(" │ ", Style::default().fg(theme::FG_DIM)),
+        Span::styled(session_short, Style::default().fg(theme::FG_MUTED)),
     ]);
 
     let header = Paragraph::new(header_text)
-        .style(Style::default().bg(theme::BG));
-
+        .style(Style::default().bg(theme::BG_DARK));
     f.render_widget(header, area);
 }
 
@@ -701,53 +684,47 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     for msg in &app.messages {
         match msg {
             Message::User { text } => {
-                // 用户消息：蓝色气泡风格
+                // 用户消息：OpenCode 风格 - 左侧绿色竖线 + 标签
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled(" ┌─ ", Style::default().fg(theme::USER_BORDER)),
-                    Span::styled("🧑 你", Style::default().fg(theme::USER_BORDER).add_modifier(Modifier::BOLD)),
+                    Span::styled("│ ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+                    Span::styled("你 ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
                 ]));
-                // 用户消息也使用 Markdown 渲染
+                // 用户消息 Markdown 渲染
                 let md_lines = parse_markdown_owned(text);
                 for md_line in md_lines {
-                    let mut styled_spans = vec![Span::styled(" │ ", Style::default().fg(theme::USER_BORDER))];
+                    let mut styled_spans = vec![Span::styled("│ ", Style::default().fg(theme::ACCENT))];
                     styled_spans.extend(md_line.spans);
                     lines.push(Line::from(styled_spans));
                 }
-                lines.push(Line::from(vec![
-                    Span::styled(" └", Style::default().fg(theme::USER_BORDER)),
-                ]));
                 lines.push(Line::from(""));
             }
 
             Message::Assistant { text, done } => {
-                // AI 消息：灰色边框卡片风格
+                // AI 消息：OpenCode 风格 - 左侧灰色竖线 + 状态标记
                 let indicator = if *done { "✓" } else { "◐" };
                 let color = if *done { theme::SUCCESS } else { theme::ACCENT };
                 
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled(" ┌─ ", Style::default().fg(theme::AI_BORDER)),
-                    Span::styled(format!("🤖 AI · {}", indicator), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled("│ ", Style::default().fg(theme::AI_BORDER)),
+                    Span::styled(format!("AI {}", indicator), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 ]));
                 
                 // 解析并渲染内容（支持 thinking 块 + Markdown）
-                let content_lines = parse_content_with_thinking_markdown(text);
+                let content_lines = parse_content_with_thinking_opencode(text);
                 for line in content_lines {
                     lines.push(line);
                 }
-                
-                lines.push(Line::from(vec![
-                    Span::styled(" └", Style::default().fg(theme::AI_BORDER)),
-                ]));
                 lines.push(Line::from(""));
             }
 
             Message::ToolCall { tool_name, args, status, .. } => {
+                // OpenCode 风格：■ 填充方块作为状态指示器
                 let (icon, color) = match status {
-                    ToolStatus::InProgress => ("◐", theme::WARNING),
-                    ToolStatus::Success => ("✓", theme::SUCCESS),
-                    ToolStatus::Failure => ("✗", theme::ERROR),
+                    ToolStatus::InProgress => ("■", theme::WARNING),
+                    ToolStatus::Success => ("■", theme::SUCCESS),
+                    ToolStatus::Failure => ("■", theme::ERROR),
                 };
                 let args_display = if args.len() > 60 {
                     format!("{}...", &args[..60])
@@ -755,20 +732,21 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                     args.clone()
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+                    Span::styled(format!("  {} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         format!("{}", tool_name),
                         Style::default().fg(theme::ACCENT_BLUE).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(": {}", args_display), Style::default().fg(theme::FG_DIM)),
+                    Span::styled(format!(" {}", args_display), Style::default().fg(theme::FG_DIM)),
                 ]));
             }
 
             Message::ToolResult { tool_name, result, status, .. } => {
+                // OpenCode 风格：■ 填充方块作为结果状态
                 let (icon, color) = match status {
-                    ToolStatus::Success => ("✓", theme::SUCCESS),
-                    ToolStatus::Failure => ("✗", theme::ERROR),
-                    ToolStatus::InProgress => ("◐", theme::WARNING),
+                    ToolStatus::Success => ("■", theme::SUCCESS),
+                    ToolStatus::Failure => ("■", theme::ERROR),
+                    ToolStatus::InProgress => ("■", theme::WARNING),
                 };
                 // 结果截断显示
                 let display = if result.len() > 150 {
@@ -790,7 +768,7 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
             Message::Error { text } => {
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled(" ✗ 错误: ", Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)),
+                    Span::styled("■ ", Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)),
                     Span::styled(text.clone(), Style::default().fg(theme::ERROR)),
                 ]));
                 lines.push(Line::from(""));
@@ -809,27 +787,37 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     if app.is_streaming && app.streaming_text.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(" ┌─ ", Style::default().fg(theme::AI_BORDER)),
-            Span::styled("🤖 AI", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("│ ", Style::default().fg(theme::AI_BORDER)),
+            Span::styled("AI ◐", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
         ]));
         lines.push(Line::from(vec![
-            Span::styled(" │ ", Style::default().fg(theme::AI_BORDER)),
+            Span::styled("│ ", Style::default().fg(theme::AI_BORDER)),
             Span::styled("思考中", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
             Span::styled("...", Style::default().fg(theme::ACCENT)),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled(" └", Style::default().fg(theme::AI_BORDER)),
-        ]));
     }
 
-    // 自动滚动到底部
+    // 渲染消息区
     let scroll = calculate_scroll(area, &lines, app);
-
+    let total_lines = lines.len() as u16;
     let messages_widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
 
     f.render_widget(messages_widget, area);
+
+    // 滚动条（始终显示，使用 ANSI 醒目符号）
+    let visible_lines = area.height;
+    let scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("▲"))
+        .end_symbol(Some("▼"))
+        .track_symbol(Some("│"))
+        .thumb_symbol("█");
+    let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
+        .position(scroll as usize)
+        .viewport_content_length(visible_lines as usize);
+    f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
 /// Markdown 解析 - 将文本解析为带样式的 Line<'static> 列表（所有 Span 拥有自己的 String）
@@ -1140,8 +1128,8 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
-/// 解析内容，提取 thinking 块并格式化（带 Markdown 支持）
-fn parse_content_with_thinking_markdown(content: &str) -> Vec<Line<'static>> {
+/// 解析内容，提取 thinking 块并格式化（OpenCode 风格 - + Thought 橙色标记）
+fn parse_content_with_thinking_opencode(content: &str) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut normal_content = String::new();
     
@@ -1158,25 +1146,26 @@ fn parse_content_with_thinking_markdown(content: &str) -> Vec<Line<'static>> {
             // 输出正常内容（带 Markdown + 彩色列表）
             for md_line in parse_markdown_owned(&normal_content) {
                 let colored = apply_list_colors(md_line.spans);
-                let mut styled_spans = vec![Span::styled(" │ ", Style::default().fg(theme::AI_BORDER))];
+                let mut styled_spans = vec![Span::styled("│ ", Style::default().fg(theme::AI_BORDER))];
                 styled_spans.extend(colored);
                 lines.push(Line::from(styled_spans));
             }
             normal_content.clear();
             
-            // 输出 thinking 块（折叠样式）
+            // 输出 thinking 块（OpenCode 风格：+ Thought 橙色）
             lines.push(Line::from(vec![
-                Span::styled(" │ ", Style::default().fg(theme::AI_BORDER)),
-                Span::styled("▼ Thinking", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
+                Span::styled("│ ", Style::default().fg(theme::AI_BORDER)),
+                Span::styled("+ Thought", Style::default().fg(theme::LIST_ORANGE).add_modifier(Modifier::BOLD)),
             ]));
             for line in thinking_content.lines() {
+                // thinking 内容每行带缩进，用灰色文字
                 lines.push(Line::from(vec![
-                    Span::styled(" │   ", Style::default().fg(theme::AI_BORDER)),
+                    Span::styled("│   ", Style::default().fg(theme::AI_BORDER)),
                     Span::styled(line.to_string(), Style::default().fg(theme::FG_MUTED)),
                 ]));
             }
         } else {
-            // 未闭合的 thinking 标签
+            // 未闭合的 thinking 标签 - 流式输出中，显示为进行中的 thinking
             normal_content.push_str(remaining);
             break;
         }
@@ -1187,7 +1176,7 @@ fn parse_content_with_thinking_markdown(content: &str) -> Vec<Line<'static>> {
     // 输出剩余的正常内容（带 Markdown 解析和彩色列表）
     for md_line in parse_markdown_owned(&normal_content) {
         let colored = apply_list_colors(md_line.spans);
-        let mut final_spans = vec![Span::styled(" │ ", Style::default().fg(theme::AI_BORDER))];
+        let mut final_spans = vec![Span::styled("│ ", Style::default().fg(theme::AI_BORDER))];
         final_spans.extend(colored);
         lines.push(Line::from(final_spans));
     }
@@ -1267,7 +1256,7 @@ fn apply_list_colors(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
 /// 计算滚动偏移：如果用户手动滚动了，用 scroll_offset；否则自动跟底部
 fn calculate_scroll(area: Rect, lines: &[Line], app: &App) -> u16 {
     let total_lines = lines.len() as u16;
-    let visible_lines = area.height.saturating_sub(2); // 预留 2 行给边界
+    let visible_lines = area.height;  // 消息区无边框，全区域可用
 
     if app.manual_scroll {
         // 用户手动滚动：底部位置 - scroll_offset
@@ -1287,70 +1276,107 @@ fn calculate_scroll(area: Rect, lines: &[Line], app: &App) -> u16 {
     }
 }
 
-/// 渲染提示栏
-fn render_hint(f: &mut Frame, area: Rect, app: &App) {
-    let hint_text = if app.manual_scroll {
-        // 手动滚动模式提示
-        Line::from(vec![
-            Span::styled(" 📜 ", Style::default().fg(theme::ACCENT)),
-            Span::styled("手动滚动模式", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(" — ", Style::default().fg(theme::FG_DIM)),
-            Span::styled("Esc", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(" 回到底部", Style::default().fg(theme::FG_DIM)),
-        ])
-    } else if app.is_streaming {
-        Line::from(vec![
-            Span::styled(" ⏳ ", Style::default().fg(theme::WARNING)),
-            Span::styled("AI 正在回复... 按 Esc 取消", Style::default().fg(theme::FG_DIM)),
-        ])
+/// 渲染底部版本栏（OpenCode 风格：消息统计 │ 快捷键 │ 版本号）
+fn render_footer(f: &mut Frame, area: Rect, app: &App) {
+    let msg_count = app.messages.len();
+    // 计算消息文本总字符数（模拟 token 统计）
+    let total_chars: usize = app.messages.iter().map(|m| match m {
+        Message::User { text } => text.len(),
+        Message::Assistant { text, .. } => text.len(),
+        Message::ToolCall { args, .. } => args.len(),
+        Message::ToolResult { result, .. } => result.len(),
+        Message::Error { text } => text.len(),
+        Message::System { text } => text.len(),
+    }).sum();
+    let token_display = if total_chars > 1000 {
+        format!("{}.{}K", total_chars / 1000, (total_chars % 1000) / 100)
     } else {
-        Line::from(vec![
-            Span::styled(" 💡 ", Style::default().fg(theme::ACCENT)),
-            Span::styled("提示: ", Style::default().fg(theme::FG_DIM)),
-            Span::styled("Ctrl+C", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(" 退出, ", Style::default().fg(theme::FG_DIM)),
-            Span::styled("/help", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(" 查看命令", Style::default().fg(theme::FG_DIM)),
-        ])
+        format!("{}", total_chars)
     };
 
-    let hint = Paragraph::new(hint_text)
-        .style(Style::default().bg(theme::BG));
-
-    f.render_widget(hint, area);
+    let footer_text = Line::from(vec![
+        Span::styled(format!(" {}msg", msg_count), Style::default().fg(theme::FG_DIM)),
+        Span::styled(format!(" │ {} ", token_display), Style::default().fg(theme::FG_DIM)),
+        Span::styled("ctrl+p", Style::default().fg(theme::ACCENT_BLUE)),
+        Span::styled(" cmds", Style::default().fg(theme::FG_DIM)),
+        Span::raw("   "),
+        Span::styled("● v0.1.0", Style::default().fg(theme::FG_MUTED)),
+    ]);
+    let footer = Paragraph::new(footer_text)
+        .style(Style::default().bg(theme::BG_DARK));
+    f.render_widget(footer, area);
 }
 
-/// 渲染输入框
+/// 渲染输入框（底部独立圆角边框区域 - OpenCode 风格）
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
+    // 独立圆角边框输入区（与消息区明显分离 - 这是核心 UX 改进点）
     let input_block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme::BORDER));
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_FOCUS))
+        .style(Style::default().bg(theme::BG_INPUT))
+        .title(" Input ")
+        .title_alignment(Alignment::Left);
 
-    let input_text = if app.is_streaming {
-        Line::from(vec![
+    let inner = input_block.inner(area);
+    f.render_widget(input_block, area);
+
+    if app.is_streaming {
+        // 流式时显示等待状态
+        let waiting = Paragraph::new(Line::from(vec![
             Span::styled(" ⏳ ", Style::default().fg(theme::WARNING)),
-            Span::styled("等待 AI 回复...", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
-        ])
+            Span::styled("AI 正在回复... 按 Esc 取消", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
+        ]))
+        .style(Style::default().bg(theme::BG_INPUT));
+        f.render_widget(waiting, inner);
     } else {
-        Line::from(vec![
-            Span::styled(" > ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(app.input.clone(), Style::default().fg(theme::FG)),
-            Span::styled("▎", Style::default().fg(theme::ACCENT)),
-        ])
-    };
+        // 多行输入渲染
+        let (cursor_line, cursor_col) = app.cursor_pos;
+        let mut input_render_lines: Vec<Line> = Vec::new();
+        
+        for (i, line) in app.input_lines.iter().enumerate() {
+            let mut spans = vec![
+                Span::styled("■ ", Style::default().fg(theme::INPUT_PROMPT).add_modifier(Modifier::BOLD)),
+            ];
+            
+            if i == cursor_line {
+                // 当前光标行 - 显示光标位置（按字符位置切片，处理 UTF-8 多字节字符）
+                let col = cursor_col.min(line.chars().count());
+                let before_cursor: String = line.chars().take(col).collect();
+                let after_cursor: String = line.chars().skip(col).collect();
+                spans.push(Span::styled(before_cursor, Style::default().fg(theme::FG)));
+                spans.push(Span::styled("▎", Style::default().fg(theme::INPUT_CURSOR)));
+                spans.push(Span::styled(after_cursor, Style::default().fg(theme::FG)));
+            } else {
+                spans.push(Span::styled(line.clone(), Style::default().fg(theme::FG)));
+            }
+            
+            input_render_lines.push(Line::from(spans));
+        }
+        
+        // 空输入时显示 placeholder
+        if app.input_lines.len() == 1 && app.input_lines[0].is_empty() {
+            input_render_lines = vec![
+                Line::from(vec![
+                    Span::styled("■ ", Style::default().fg(theme::INPUT_PROMPT).add_modifier(Modifier::BOLD)),
+                    Span::styled("Type your prompt... (Enter send, Shift+Enter newline, ↑↓ history)",
+                        Style::default().fg(theme::FG_PLACEHOLDER).add_modifier(Modifier::ITALIC)),
+                ]),
+            ];
+        }
+        
+        let input = Paragraph::new(input_render_lines)
+            .style(Style::default().bg(theme::BG_INPUT))
+            .wrap(Wrap { trim: false });
 
-    let input = Paragraph::new(input_text)
-        .block(input_block)
-        .wrap(Wrap { trim: false });
-
-    f.render_widget(input, area);
+        f.render_widget(input, inner);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  键盘事件处理
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// 处理聊天界面的键盘事件
+/// 处理聊天界面的键盘事件（支持多行输入 + 输入历史 + 光标移动）
 fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mpsc::UnboundedSender<AppEvent>) {
     // Ctrl+C 退出
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -1370,7 +1396,34 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
         return;
     }
 
-    // 滚动操作（流式时也允许滚动，不阻塞输入）
+    // Ctrl+U 清空输入
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
+        app.clear_input();
+        return;
+    }
+
+    // Ctrl+K 删除从光标到行尾
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('k') {
+        let (line, col) = app.cursor_pos;
+        if line < app.input_lines.len() {
+            app.input_lines[line].truncate(col);
+        }
+        return;
+    }
+
+    // Ctrl+W 删除前一个单词
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
+        let (line, col) = app.cursor_pos;
+        if line < app.input_lines.len() && col > 0 {
+            let content = &app.input_lines[line];
+            let word_start = content[..col].trim_end().rfind(' ').map(|i| i + 1).unwrap_or(0);
+            app.input_lines[line] = content[..word_start].to_string() + &content[col..];
+            app.cursor_pos.1 = word_start;
+        }
+        return;
+    }
+
+    // 滚动操作（PageUp/PageDown + Shift+↑↓）
     match key.code {
         KeyCode::PageUp => {
             app.manual_scroll = true;
@@ -1404,9 +1457,60 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
         return;
     }
 
+    // 输入历史导航（↑↓ 不带 Shift）
+    // 注意：多行输入时，↑↓ 在第一行/最后一行才触发历史导航
+    if key.code == KeyCode::Up && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        let (line, _col) = app.cursor_pos;
+        if line == 0 {
+            // 在第一行按 ↑，触发历史导航
+            if let Some(prev) = app.input_history.navigate_up(&app.get_input_text()) {
+                app.set_input_text(prev);
+            }
+        } else {
+            app.cursor_up();
+        }
+        return;
+    }
+    if key.code == KeyCode::Down && !key.modifiers.contains(KeyModifiers::SHIFT) {
+        let (line, _col) = app.cursor_pos;
+        if line >= app.input_lines.len() - 1 {
+            // 在最后一行按 ↓，触发历史导航
+            if let Some(next) = app.input_history.navigate_down() {
+                app.set_input_text(next);
+            }
+        } else {
+            app.cursor_down();
+        }
+        return;
+    }
+
+    // 光标移动
+    if key.code == KeyCode::Left {
+        app.cursor_left();
+        return;
+    }
+    if key.code == KeyCode::Right {
+        app.cursor_right();
+        return;
+    }
+    if key.code == KeyCode::Home {
+        app.cursor_home();
+        return;
+    }
+    if key.code == KeyCode::End {
+        app.cursor_end();
+        return;
+    }
+
+    // Shift+Enter 换行
+    if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.insert_newline();
+        return;
+    }
+
     // Enter 发送消息
     if key.code == KeyCode::Enter {
-        let text = app.input.trim().to_string();
+        let text = app.get_input_text().trim().to_string();
         if text.is_empty() {
             return;
         }
@@ -1471,19 +1575,19 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
 
     // 退格删除
     if key.code == KeyCode::Backspace {
-        app.input.pop();
+        app.backspace();
         return;
     }
 
-    // Ctrl+U 清空输入
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-        app.input.clear();
+    // Delete 删除
+    if key.code == KeyCode::Delete {
+        app.delete_char();
         return;
     }
 
     // 字符输入
     if let KeyCode::Char(c) = key.code {
-        app.input.push(c);
+        app.insert_char(c);
     }
 }
 
@@ -1504,29 +1608,4 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
         }
         _ => {}
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  辅助函数
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// 创建居中矩形
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
 }

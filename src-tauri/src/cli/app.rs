@@ -5,6 +5,8 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
 /// CLI 命令行参数
 #[derive(Parser, Debug)]
@@ -40,6 +42,7 @@ pub struct ReActEvent {
     #[serde(default)]
     pub content: Option<String>,
     #[serde(rename = "toolCallId", default)]
+    #[allow(dead_code)]
     pub tool_call_id: Option<String>,
     #[serde(rename = "toolName", default)]
     pub tool_name: Option<String>,
@@ -120,6 +123,7 @@ pub enum Message {
     /// 工具结果
     ToolResult {
         tool_name: String,
+        #[allow(dead_code)]
         tool_call_id: String,
         result: String,
         status: ToolStatus,
@@ -143,11 +147,131 @@ pub enum AppEvent {
     /// SSE 事件到达
     SseEvent(ReActEvent),
     /// 用户发送消息
+    #[allow(dead_code)]
     UserInput(String),
     /// 请求完成
     Done,
     /// 错误
     Error(String),
+}
+
+/// 输入历史管理
+pub struct InputHistory {
+    /// 历史条目
+    entries: Vec<String>,
+    /// 当前浏览位置（None = 正在输入新内容）
+    index: Option<usize>,
+    /// 临时保存的当前输入（浏览历史时用于恢复）
+    temp_input: String,
+    /// 最大条目数
+    max_entries: usize,
+    /// 历史文件路径
+    history_file: Option<PathBuf>,
+}
+
+impl InputHistory {
+    pub fn new(max_entries: usize) -> Self {
+        let history_file = Self::get_history_path();
+        let entries = history_file.as_ref()
+            .and_then(|path| Self::load_from_file(path))
+            .unwrap_or_default();
+
+        Self {
+            entries,
+            index: None,
+            temp_input: String::new(),
+            max_entries,
+            history_file,
+        }
+    }
+
+    /// 获取历史文件路径
+    fn get_history_path() -> Option<PathBuf> {
+        dirs::home_dir().map(|home| home.join(".walicode").join("cli_history"))
+    }
+
+    /// 从文件加载历史
+    fn load_from_file(path: &PathBuf) -> Option<Vec<String>> {
+        if let Ok(content) = fs::read_to_string(path) {
+            let entries: Vec<String> = content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            Some(entries)
+        } else {
+            None
+        }
+    }
+
+    /// 保存历史到文件
+    pub fn save(&self) {
+        if let Some(ref path) = self.history_file {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let content = self.entries.join("\n");
+            let _ = fs::write(path, content);
+        }
+    }
+
+    /// 添加新条目
+    pub fn add(&mut self, entry: String) {
+        if entry.trim().is_empty() {
+            return;
+        }
+        // 避免重复连续添加相同内容
+        if self.entries.last() != Some(&entry) {
+            self.entries.push(entry);
+            if self.entries.len() > self.max_entries {
+                self.entries.remove(0);
+            }
+            self.save();
+        }
+        self.index = None;
+        self.temp_input.clear();
+    }
+
+    /// 向上浏览历史（返回上一个输入）
+    pub fn navigate_up(&mut self, current_input: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        // 第一次按上键，保存当前输入
+        if self.index.is_none() {
+            self.temp_input = current_input.to_string();
+            self.index = Some(self.entries.len() - 1);
+        } else if let Some(idx) = self.index {
+            if idx > 0 {
+                self.index = Some(idx - 1);
+            }
+        }
+
+        self.index.map(|i| self.entries[i].clone())
+    }
+
+    /// 向下浏览历史（返回下一个输入）
+    pub fn navigate_down(&mut self) -> Option<String> {
+        if let Some(idx) = self.index {
+            if idx + 1 < self.entries.len() {
+                self.index = Some(idx + 1);
+                Some(self.entries[idx + 1].clone())
+            } else {
+                // 回到最新，恢复临时输入
+                self.index = None;
+                Some(self.temp_input.clone())
+            }
+        } else {
+            None
+        }
+    }
+
+    /// 获取历史条目数
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// App 状态
@@ -162,8 +286,10 @@ pub struct App {
     pub session_id: Option<String>,
     /// 对话消息列表
     pub messages: Vec<Message>,
-    /// 当前输入缓冲
-    pub input: String,
+    /// 当前输入缓冲（多行输入支持）
+    pub input_lines: Vec<String>,
+    /// 光标位置（行，列）
+    pub cursor_pos: (usize, usize),
     /// 是否正在等待 AI 回复
     pub is_streaming: bool,
     /// 是否应该退出
@@ -180,6 +306,8 @@ pub struct App {
     pub scroll_offset: u16,
     /// 是否处于手动滚动模式（流式输出时自动切回 auto-scroll）
     pub manual_scroll: bool,
+    /// 输入历史
+    pub input_history: InputHistory,
 }
 
 impl App {
@@ -195,7 +323,8 @@ impl App {
             user_id: args.user_id.clone(),
             session_id: None,
             messages: Vec::new(),
-            input: String::new(),
+            input_lines: vec![String::new()],
+            cursor_pos: (0, 0),
             is_streaming: false,
             should_quit: false,
             streaming_text: String::new(),
@@ -204,6 +333,147 @@ impl App {
             workdir,
             scroll_offset: 0,
             manual_scroll: false,
+            input_history: InputHistory::new(1000),
+        }
+    }
+
+    /// 获取当前输入内容（多行合并为单个字符串）
+    pub fn get_input_text(&self) -> String {
+        self.input_lines.join("\n")
+    }
+
+    /// 设置输入内容（用于历史导航）
+    pub fn set_input_text(&mut self, text: String) {
+        self.input_lines = text.lines().map(|s| s.to_string()).collect();
+        if self.input_lines.is_empty() {
+            self.input_lines.push(String::new());
+        }
+        self.cursor_pos = (self.input_lines.len() - 1, self.input_lines.last().unwrap().len());
+    }
+
+    /// 清空输入
+    pub fn clear_input(&mut self) {
+        self.input_lines = vec![String::new()];
+        self.cursor_pos = (0, 0);
+    }
+
+    /// 在光标位置插入字符（支持 UTF-8 多字节字符）
+    pub fn insert_char(&mut self, c: char) {
+        let (line, col) = self.cursor_pos;
+        if line < self.input_lines.len() {
+            let text = &self.input_lines[line];
+            let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
+            self.input_lines[line].insert(byte_pos, c);
+            self.cursor_pos.1 += 1;
+        }
+    }
+
+    /// 在光标位置删除字符（退格，支持 UTF-8 多字节字符）
+    pub fn backspace(&mut self) -> bool {
+        let (line, col) = self.cursor_pos;
+        if col > 0 {
+            // 行内删除：找到字符边界
+            let text = &self.input_lines[line];
+            let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
+            let prev_byte_pos = text.char_indices().nth(col - 1).map(|(i, _)| i).unwrap_or(0);
+            self.input_lines[line].replace_range(prev_byte_pos..byte_pos, "");
+            self.cursor_pos.1 -= 1;
+            true
+        } else if line > 0 {
+            // 跨行合并：当前行内容附加到上一行末尾
+            let current_line = self.input_lines.remove(line);
+            let prev_len = self.input_lines[line - 1].chars().count();
+            self.input_lines[line - 1].push_str(&current_line);
+            self.cursor_pos = (line - 1, prev_len);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 删除光标后的字符（Delete键，支持 UTF-8 多字节字符）
+    pub fn delete_char(&mut self) {
+        let (line, col) = self.cursor_pos;
+        if line < self.input_lines.len() {
+            let text = &self.input_lines[line];
+            let char_count = text.chars().count();
+            if col < char_count {
+                // 行内删除：找到字符边界
+                let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
+                let next_byte_pos = text.char_indices().nth(col + 1).map(|(i, _)| i).unwrap_or(text.len());
+                self.input_lines[line].replace_range(byte_pos..next_byte_pos, "");
+            } else if line + 1 < self.input_lines.len() {
+                // 跨行合并：下一行内容附加到当前行末尾
+                let next_line = self.input_lines.remove(line + 1);
+                self.input_lines[line].push_str(&next_line);
+            }
+        }
+    }
+
+    /// 插入新行（Shift+Enter，支持 UTF-8 多字节字符）
+    pub fn insert_newline(&mut self) {
+        let (line, col) = self.cursor_pos;
+        if line < self.input_lines.len() {
+            let text = &self.input_lines[line];
+            let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
+            let after = self.input_lines[line].split_off(byte_pos);
+            self.input_lines.insert(line + 1, after);
+            self.cursor_pos = (line + 1, 0);
+        }
+    }
+
+    /// 光标左移
+    pub fn cursor_left(&mut self) {
+        let (line, col) = self.cursor_pos;
+        if col > 0 {
+            self.cursor_pos.1 -= 1;
+        } else if line > 0 {
+            // 跳到上一行末尾
+            let prev_len = self.input_lines[line - 1].chars().count();
+            self.cursor_pos = (line - 1, prev_len);
+        }
+    }
+
+    /// 光标右移
+    pub fn cursor_right(&mut self) {
+        let (line, col) = self.cursor_pos;
+        let line_len = self.input_lines[line].chars().count();
+        if col < line_len {
+            self.cursor_pos.1 += 1;
+        } else if line + 1 < self.input_lines.len() {
+            // 跳到下一行开头
+            self.cursor_pos = (line + 1, 0);
+        }
+    }
+
+    /// 光标上移
+    pub fn cursor_up(&mut self) {
+        let (line, col) = self.cursor_pos;
+        if line > 0 {
+            let prev_len = self.input_lines[line - 1].chars().count();
+            self.cursor_pos = (line - 1, col.min(prev_len));
+        }
+    }
+
+    /// 光标下移
+    pub fn cursor_down(&mut self) {
+        let (line, col) = self.cursor_pos;
+        if line + 1 < self.input_lines.len() {
+            let next_len = self.input_lines[line + 1].chars().count();
+            self.cursor_pos = (line + 1, col.min(next_len));
+        }
+    }
+
+    /// 光标移到行首
+    pub fn cursor_home(&mut self) {
+        self.cursor_pos.1 = 0;
+    }
+
+    /// 光标移到行尾
+    pub fn cursor_end(&mut self) {
+        let line = self.cursor_pos.0;
+        if line < self.input_lines.len() {
+            self.cursor_pos.1 = self.input_lines[line].chars().count();
         }
     }
 
@@ -292,7 +562,7 @@ impl App {
             "done" => {
                 // 标记 Assistant 消息完成
                 if let Some(last) = self.messages.last_mut() {
-                    if let Message::Assistant { text, done } = last {
+                    if let Message::Assistant { text: _, done } = last {
                         *done = true;
                     }
                 }
@@ -334,7 +604,7 @@ impl App {
                 // CLI 模式下本地命令直接执行（不依赖 Tauri invoke）
                 let cmd_id = event.cmd_id.unwrap_or_default();
                 let command = event.command.unwrap_or_default();
-                let cwd = event.cwd.clone();
+                let _cwd = event.cwd.clone();
 
                 if !cmd_id.is_empty() && !command.is_empty() {
                     self.messages.push(Message::System {
@@ -369,10 +639,13 @@ impl App {
 
     /// 用户发送消息
     pub fn send_message(&mut self, text: String) {
+        // 添加到历史
+        self.input_history.add(text.clone());
+        // 添加到消息列表
         self.messages.push(Message::User { text: text.clone() });
         self.is_streaming = true;
         self.streaming_text.clear();
-        self.input.clear();
+        self.clear_input();
     }
 
     /// 斜杠命令处理

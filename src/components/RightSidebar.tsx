@@ -556,7 +556,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   const currentSession = currentSessionId ? sessions.get(currentSessionId) : null
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLDivElement>(null)
+  const [isManualScroll, setIsManualScroll] = useState(false)
   const inputHtmlRef = useRef<string>('')
   const lastRangeRef = useRef<Range | null>(null)
   const [isFocused, setIsFocused] = useState(false)
@@ -745,9 +747,12 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     return `向 WaLiSSH 提问...（${currentKeyLabel} 发送 · Enter 换行）`
   }
 
+  // 自动滚动到底部（仅在非手动滚动模式）
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [currentSession?.messages, isLoading])
+    if (!isManualScroll) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [currentSession?.messages, isLoading, isManualScroll])
 
   const syncInputTextFromDom = () => {
     if (!inputRef.current) return
@@ -971,6 +976,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
   const handleSend = async () => {
     if (isLoading || !currentAgentId || !inputRef.current) return
+    // 发送新消息时取消手动滚动，自动滚到底部
+    setIsManualScroll(false)
     // 清除之前的错误恢复卡片
     setErrorRecovery(null)
     const plainText = inputRef.current.innerText.replace(/\u00a0/g, ' ').trim()
@@ -1582,7 +1589,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         )
       })()}
 
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div
+        ref={messagesContainerRef}
+        className="flex-1 overflow-y-auto min-h-0"
+        onScroll={() => {
+          const container = messagesContainerRef.current
+          if (!container) return
+          const { scrollTop, scrollHeight, clientHeight } = container
+          const isAtBottom = scrollHeight - scrollTop - clientHeight < 50
+          // 向上滚动（非底部）进入手动模式，滚动到底部退出手动模式
+          setIsManualScroll(!isAtBottom)
+        }}
+      >
         {!currentSession ? (
           <EmptyState onQuickAction={(text) => {
             if (inputRef.current) {

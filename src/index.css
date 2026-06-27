@@ -10,6 +10,15 @@
   }
 }
 
+/* xterm.js 滚动支持 */
+.xterm .xterm-viewport {
+  overflow-y: auto !important;
+}
+
+.xterm .xterm-scrollable-element {
+  overflow-y: auto !important;
+}
+
 :root {
   --bg-primary: #1e1e1e;
   --bg-secondary: #252526;

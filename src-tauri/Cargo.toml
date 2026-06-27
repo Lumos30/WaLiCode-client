@@ -50,4 +50,5 @@ clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
 unicode-width = "0.2"
 syntect = "5"
+dirs = "5"
 

@@ -318,7 +318,7 @@ pub fn build_project_context(workdir: &Option<String>) -> Option<ProjectContext>
 fn execute_local_command_internal(
     command: &str,
     cwd: Option<&str>,
-    timeout_ms: u64,
+    _timeout_ms: u64,
 ) -> Result<LocalCommandResult, String> {
     use std::process::{Command, Stdio};
     use std::time::Instant;
@@ -354,7 +354,7 @@ fn execute_local_command_internal(
         stderr,
         exit_code,
         success: exit_code == 0,
-        duration_ms: start.elapsed().as_millis() as u64,
+        _duration_ms: start.elapsed().as_millis() as u64,
     })
 }
 
@@ -364,5 +364,5 @@ struct LocalCommandResult {
     stderr: String,
     exit_code: i32,
     success: bool,
-    duration_ms: u64,
+    _duration_ms: u64,
 }
