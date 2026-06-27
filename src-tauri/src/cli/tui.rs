@@ -4,26 +4,36 @@
 //! 设计风格：类似 Claude Code / OpenCode 的简洁终端对话界面。
 //!
 //! 布局：
-//! ┌─────────────────────────────────────────┐
-//! │ Header: WaLiCode v0.1 | Agent: unified  │
-//! ├─────────────────────────────────────────┤
-//! │                                         │
-//! │  [消息区域 - 自动滚动]                  │
-//! │                                         │
-//! │  🧑 你: 帮我看看这个项目                │
-//! │                                         │
-//! │  🤖 AI: 让我分析一下项目架构...         │
-//! │                                         │
-//! │  🔧 tool_call: FileRead(path=...)       │
-//! │  ✅ tool_result: 文件内容...            │
-//! │                                         │
-//! ├─────────────────────────────────────────┤
-//! │ Status: Streaming... | Step 3/10        │
-//! ├─────────────────────────────────────────┤
-//! │ > 输入你的消息...                       │
-//! └─────────────────────────────────────────┘
+//! ┌──────────────────────────────────────────────────────────────┐
+//! │ Header: WaLiCode v0.1.0 | Agent: unified | Session: xxx      │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │                                                              │
+//! │  [消息区域 - 自动滚动]                                        │
+//! │                                                              │
+//! │  ┌────────────────────────────────────────────────────┐     │
+//! │  │ 🧑 你                                              │     │
+//! │  │ 帮我看看这个项目                                    │     │
+//! │  └────────────────────────────────────────────────────┘     │
+//! │                                                              │
+//! │  ┌────────────────────────────────────────────────────┐     │
+//! │  │ 🤖 AI · 2.3s                                       │     │
+//! │  │ 让我分析一下项目架构...                             │     │
+//! │  │                                                    │     │
+//! │  │ ▼ Thinking                                         │     │
+//! │  │   1. 首先查看项目结构                               │     │
+//! │  │   2. 分析主要代码文件                               │     │
+//! │  └────────────────────────────────────────────────────┘     │
+//! │                                                              │
+//! │  🔧 FileRead: src/main.rs                                    │
+//! │  ✅ FileRead: 完成 (234 lines)                               │
+//! │                                                              │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │ 💡 提示: 按 Ctrl+C 退出, /help 查看命令                      │
+//! ├──────────────────────────────────────────────────────────────┤
+//! │ > 输入你的消息...                                            │
+//! └──────────────────────────────────────────────────────────────┘
 
-use crate::_cli_app::{App, AppEvent, CliArgs, Message, ToolStatus, ReActEvent};
+use crate::_cli_app::{App, AppEvent, CliArgs, Message, ToolStatus, ReActEvent, StepInfo};
 use crate::_cli_sse::{SseClient, build_project_context};
 
 use crossterm::{
@@ -33,14 +43,42 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
-use std::io;
+use std::io::{self, Read};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// 检查 stdin 是否为 TTY（终端）
+fn is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
+/// 主题颜色配置（OpenCode 风格）
+mod theme {
+    use ratatui::style::Color;
+
+    pub const BG: Color = Color::Rgb(245, 245, 245);           // 浅灰背景
+    pub const FG: Color = Color::Rgb(60, 60, 60);              // 主文字色
+    pub const FG_DIM: Color = Color::Rgb(120, 120, 120);       // 次要文字
+    pub const FG_MUTED: Color = Color::Rgb(160, 160, 160);     // 更淡的文字
+    pub const BORDER: Color = Color::Rgb(220, 220, 220);       // 边框色
+    pub const USER_BG: Color = Color::Rgb(235, 245, 255);      // 用户消息背景
+    pub const USER_BORDER: Color = Color::Rgb(100, 150, 200);  // 用户消息边框
+    pub const AI_BG: Color = Color::Rgb(255, 255, 255);        // AI 消息背景
+    pub const AI_BORDER: Color = Color::Rgb(200, 200, 200);    // AI 消息边框
+    pub const THINKING_BG: Color = Color::Rgb(250, 250, 250);  // Thinking 背景
+    pub const ACCENT: Color = Color::Rgb(80, 160, 80);         // 强调色（绿色）
+    pub const ACCENT_BLUE: Color = Color::Rgb(60, 120, 180);   // 蓝色强调
+    pub const ERROR: Color = Color::Rgb(200, 80, 80);          // 错误红
+    pub const WARNING: Color = Color::Rgb(200, 160, 60);       // 警告黄
+    pub const SUCCESS: Color = Color::Rgb(60, 160, 60);        // 成功绿
+}
 
 /// 运行 CLI 模式
 pub async fn run_cli(args: CliArgs) {
@@ -124,8 +162,30 @@ async fn run_one_shot(args: CliArgs, message: String) {
 
 /// 交互式 TUI 模式
 async fn run_tui(args: CliArgs) {
+    // 检查是否为 TTY，如果不是则切换到非交互模式
+    if !is_tty() {
+        eprintln!("⚠️  检测到非交互环境，切换到非交互模式");
+        // 尝试从 stdin 读取消息
+        let mut message = String::new();
+        if std::io::stdin().read_to_string(&mut message).is_ok() && !message.trim().is_empty() {
+            run_one_shot(args, message.trim().to_string()).await;
+        } else {
+            eprintln!("❌ 非交互模式需要提供消息: walicode-cli -m '消息' 或通过管道传入");
+        }
+        return;
+    }
+    
     // 初始化终端
-    enable_raw_mode().expect("Failed to enable raw mode");
+    if let Err(e) = enable_raw_mode() {
+        eprintln!("⚠️  无法启用终端 raw 模式 ({}), 切换到非交互模式", e);
+        let mut message = String::new();
+        if std::io::stdin().read_to_string(&mut message).is_ok() && !message.trim().is_empty() {
+            run_one_shot(args, message.trim().to_string()).await;
+        } else {
+            eprintln!("❌ 非交互模式需要提供消息: walicode-cli -m '消息' 或通过管道传入");
+        }
+        return;
+    }
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).expect("Failed to enter alternate screen");
     let backend = CrosstermBackend::new(stdout);
@@ -216,25 +276,23 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
 fn print_welcome(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, _app: &App) {
     terminal.draw(|f| {
         let size = f.area();
-        let welcome = Paragraph::new(Line::from(vec![
-            Span::styled(" 🚀 ", Style::default().fg(Color::Cyan)),
-            Span::styled("WaLiCode", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" — AI 驱动的终端智能运维助手"),
+        
+        let welcome = Paragraph::new(Text::from(vec![
+            Line::from(vec![
+                Span::styled(" 🚀 ", Style::default().fg(theme::ACCENT)),
+                Span::styled("WaLiCode", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(" — AI 驱动的终端智能运维助手", Style::default().fg(theme::FG_DIM)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(" ⏳ ", Style::default().fg(theme::WARNING)),
+                Span::styled("正在连接服务端...", Style::default().fg(theme::FG_DIM)),
+            ]),
         ]))
-        .wrap(Wrap { trim: false });
+        .alignment(Alignment::Center);
 
-        let connecting = Paragraph::new(Line::from(vec![
-            Span::styled(" ⏳ ", Style::default().fg(Color::Yellow)),
-            Span::raw("正在连接服务端..."),
-        ]));
-
-        let chunks = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ]).split(size);
-
-        f.render_widget(welcome, chunks[0]);
-        f.render_widget(connecting, chunks[1]);
+        let area = centered_rect(60, 20, size);
+        f.render_widget(welcome, area);
     }).expect("Failed to draw welcome");
 }
 
@@ -346,168 +404,245 @@ fn handle_mouse_event(_app: &mut App, _mouse: MouseEvent) {
 fn render(f: &mut Frame, app: &App) {
     let size = f.area();
 
-    // 整体布局：Header + Messages + Status + Input
+    // 整体布局：Header + Messages + Hint + Input
     let chunks = Layout::vertical([
-        Constraint::Length(2),  // Header
+        Constraint::Length(1),  // Header（单行）
         Constraint::Min(5),     // Messages（弹性）
-        Constraint::Length(1),  // Status
+        Constraint::Length(1),  // Hint
         Constraint::Length(3),  // Input
     ]).split(size);
 
     render_header(f, chunks[0], app);
     render_messages(f, chunks[1], app);
-    render_status(f, chunks[2], app);
+    render_hint(f, chunks[2], app);
     render_input(f, chunks[3], app);
 }
 
-/// 渲染 Header
+/// 渲染 Header（单行简洁风格）
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
-    let title = Line::from(vec![
-        Span::styled(" 🚀 WaLiCode ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw("│"),
-        Span::styled(format!(" Agent: {} ", app.agent_id), Style::default().fg(Color::Green)),
-        Span::raw("│"),
-        Span::styled(
-            format!(" Session: {} ", app.session_id.as_deref().unwrap_or("未创建")),
-            Style::default().fg(Color::DarkGray),
-        ),
+    let session_short = app.session_id.as_ref()
+        .map(|s| if s.len() > 8 { format!("{}...", &s[..8]) } else { s.clone() })
+        .unwrap_or_else(|| "未连接".to_string());
+
+    let header_text = Line::from(vec![
+        Span::styled(" WaLiCode ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled("v0.1.0", Style::default().fg(theme::FG_MUTED)),
+        Span::raw(" │ "),
+        Span::styled("Agent: ", Style::default().fg(theme::FG_DIM)),
+        Span::styled(&app.agent_id, Style::default().fg(theme::ACCENT_BLUE)),
+        Span::raw(" │ "),
+        Span::styled("Session: ", Style::default().fg(theme::FG_DIM)),
+        Span::styled(session_short, Style::default().fg(theme::FG_DIM)),
     ]);
 
-    let header = Paragraph::new(title)
-        .style(Style::default().bg(Color::Rgb(0, 0, 100)))
-        .wrap(Wrap { trim: false });
+    let header = Paragraph::new(header_text)
+        .style(Style::default().bg(theme::BG));
 
     f.render_widget(header, area);
 }
 
-/// 渲染消息区域
+/// 渲染消息区域（气泡卡片风格）
 fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
 
     for msg in &app.messages {
         match msg {
             Message::User { text } => {
+                // 用户消息：蓝色气泡风格
+                lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled(" 🧑 ", Style::default().fg(Color::Blue)),
-                    Span::styled("你:", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                    Span::styled(" ┌─ ", Style::default().fg(theme::USER_BORDER)),
+                    Span::styled("🧑 你", Style::default().fg(theme::USER_BORDER).add_modifier(Modifier::BOLD)),
                 ]));
                 for line in text.lines() {
-                    lines.push(Line::from(Span::styled(format!("   {}", line), Style::default().fg(Color::White))));
+                    lines.push(Line::from(vec![
+                        Span::styled(" │ ", Style::default().fg(theme::USER_BORDER)),
+                        Span::styled(line.to_string(), Style::default().fg(theme::FG)),
+                    ]));
                 }
-                lines.push(Line::raw("")); // 空行分隔
+                lines.push(Line::from(vec![
+                    Span::styled(" └", Style::default().fg(theme::USER_BORDER)),
+                ]));
+                lines.push(Line::from(""));
             }
 
             Message::Assistant { text, done } => {
-                let indicator = if *done { " ✅ " } else { " 🤖 " };
-                let color = if *done { Color::Green } else { Color::Cyan };
+                // AI 消息：灰色边框卡片风格
+                let indicator = if *done { "✓" } else { "◐" };
+                let color = if *done { theme::SUCCESS } else { theme::ACCENT };
+                
+                lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled(indicator, Style::default().fg(color)),
-                    Span::styled("AI:", Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(" ┌─ ", Style::default().fg(theme::AI_BORDER)),
+                    Span::styled(format!("🤖 AI · {}", indicator), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                 ]));
-                for line in text.lines() {
-                    lines.push(Line::from(Span::raw(format!("   {}", line))));
+                
+                // 解析并渲染内容（支持 thinking 块）
+                let content_lines = parse_content_with_thinking(text);
+                for line in content_lines {
+                    lines.push(line);
                 }
-                lines.push(Line::raw(""));
+                
+                lines.push(Line::from(vec![
+                    Span::styled(" └", Style::default().fg(theme::AI_BORDER)),
+                ]));
+                lines.push(Line::from(""));
             }
 
             Message::ToolCall { tool_name, args, status, .. } => {
                 let (icon, color) = match status {
-                    ToolStatus::InProgress => ("⏳", Color::Yellow),
-                    ToolStatus::Success => ("✅", Color::Green),
-                    ToolStatus::Failure => ("❌", Color::Red),
+                    ToolStatus::InProgress => ("◐", theme::WARNING),
+                    ToolStatus::Success => ("✓", theme::SUCCESS),
+                    ToolStatus::Failure => ("✗", theme::ERROR),
                 };
-                let args_display = if args.len() > 80 {
-                    format!("{}...", &args[..80])
+                let args_display = if args.len() > 60 {
+                    format!("{}...", &args[..60])
                 } else {
                     args.clone()
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+                    Span::styled(format!("  {} ", icon), Style::default().fg(color)),
                     Span::styled(
-                        format!("🔧 {}: ", tool_name),
-                        Style::default().fg(Color::Magenta),
+                        format!("{}", tool_name),
+                        Style::default().fg(theme::ACCENT_BLUE),
                     ),
-                    Span::styled(args_display, Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(": {}", args_display), Style::default().fg(theme::FG_DIM)),
                 ]));
             }
 
             Message::ToolResult { tool_name, result, status, .. } => {
                 let (icon, color) = match status {
-                    ToolStatus::Success => ("✅", Color::Green),
-                    ToolStatus::Failure => ("❌", Color::Red),
-                    ToolStatus::InProgress => ("⏳", Color::Yellow),
+                    ToolStatus::Success => ("✓", theme::SUCCESS),
+                    ToolStatus::Failure => ("✗", theme::ERROR),
+                    ToolStatus::InProgress => ("◐", theme::WARNING),
                 };
-                // 结果可能很长，截断显示
-                let display = if result.len() > 200 {
-                    format!("{}...\n   (结果共 {} 字符)", &result[..200], result.len())
+                // 结果截断显示
+                let display = if result.len() > 150 {
+                    format!("{}... ({} chars)", &result[..150], result.len())
                 } else {
                     result.clone()
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!(" {} ", icon), Style::default().fg(color)),
+                    Span::styled(format!("  {} ", icon), Style::default().fg(color)),
                     Span::styled(
-                        format!("📋 {}: ", tool_name),
-                        Style::default().fg(Color::Magenta),
+                        format!("{}", tool_name),
+                        Style::default().fg(theme::ACCENT_BLUE),
                     ),
+                    Span::styled(format!(": {}", display), Style::default().fg(theme::FG_DIM)),
                 ]));
-                for line in display.lines().take(8) {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {}", line),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-                if result.lines().count() > 8 {
-                    lines.push(Line::from(Span::styled(
-                        format!("   ... (共 {} 行)", result.lines().count()),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
+                lines.push(Line::from(""));
             }
 
             Message::Error { text } => {
+                lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled(" ❌ ", Style::default().fg(Color::Red)),
-                    Span::styled("错误: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                    Span::styled(text.clone(), Style::default().fg(Color::Red)),
+                    Span::styled(" ✗ 错误: ", Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)),
+                    Span::styled(text.clone(), Style::default().fg(theme::ERROR)),
                 ]));
-                lines.push(Line::raw(""));
+                lines.push(Line::from(""));
             }
 
             Message::System { text } => {
                 lines.push(Line::from(vec![
-                    Span::styled(" 💬 ", Style::default().fg(Color::Yellow)),
-                    Span::styled(text.clone(), Style::default().fg(Color::Yellow)),
+                    Span::styled(" 💡 ", Style::default().fg(theme::WARNING)),
+                    Span::styled(text.clone(), Style::default().fg(theme::FG_DIM)),
                 ]));
-                lines.push(Line::raw(""));
             }
         }
     }
 
     // 如果正在流式接收，显示思考动画
     if app.is_streaming && app.streaming_text.is_empty() {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(" 🤖 ", Style::default().fg(Color::Cyan)),
-            Span::styled("AI: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("思考中...", Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC)),
+            Span::styled(" ┌─ ", Style::default().fg(theme::AI_BORDER)),
+            Span::styled("🤖 AI", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" │ ", Style::default().fg(theme::AI_BORDER)),
+            Span::styled("思考中", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
+            Span::styled("...", Style::default().fg(theme::ACCENT)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" └", Style::default().fg(theme::AI_BORDER)),
         ]));
     }
 
     // 自动滚动到底部
-    let scroll = calculate_scroll(area, &app.messages, app.is_streaming);
+    let scroll = calculate_scroll(area, &lines);
 
     let messages_widget = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::NONE))
-        .scroll((scroll as u16, 0));
+        .scroll((scroll, 0));
 
-    f.render_widget(messages_widget, area.inner(Margin::new(0, 0)));
+    f.render_widget(messages_widget, area);
+}
+
+/// 解析内容，提取 thinking 块并格式化
+fn parse_content_with_thinking(content: &str) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut in_thinking = false;
+    let mut thinking_content = String::new();
+    let mut normal_content = String::new();
+    
+    // 简单的 thinking 标签解析
+    let mut remaining = content;
+    while let Some(start) = remaining.find("<think>") {
+        normal_content.push_str(&remaining[..start]);
+        remaining = &remaining[start + 7..];
+        
+        if let Some(end) = remaining.find("</think>") {
+            thinking_content = remaining[..end].trim().to_string();
+            remaining = &remaining[end + 8..];
+            
+            // 输出正常内容
+            for line in normal_content.lines() {
+                if !line.trim().is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled(" │ ", Style::default().fg(theme::AI_BORDER)),
+                        Span::styled(line.to_string(), Style::default().fg(theme::FG)),
+                    ]));
+                }
+            }
+            normal_content.clear();
+            
+            // 输出 thinking 块（折叠样式）
+            lines.push(Line::from(vec![
+                Span::styled(" │ ", Style::default().fg(theme::AI_BORDER)),
+                Span::styled("▼ Thinking", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
+            ]));
+            for line in thinking_content.lines() {
+                lines.push(Line::from(vec![
+                    Span::styled(" │   ", Style::default().fg(theme::AI_BORDER)),
+                    Span::styled(line.to_string(), Style::default().fg(theme::FG_MUTED)),
+                ]));
+            }
+        } else {
+            // 未闭合的 thinking 标签
+            normal_content.push_str(&remaining);
+            break;
+        }
+    }
+    
+    normal_content.push_str(remaining);
+    
+    // 输出剩余的正常内容
+    for line in normal_content.lines() {
+        if !line.trim().is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(" │ ", Style::default().fg(theme::AI_BORDER)),
+                Span::styled(line.to_string(), Style::default().fg(theme::FG)),
+            ]));
+        }
+    }
+    
+    lines
 }
 
 /// 计算滚动偏移（确保最新消息可见）
-fn calculate_scroll(area: Rect, messages: &Vec<Message>, is_streaming: bool) -> u16 {
-    // 估算消息总行数
-    let total_lines = estimate_total_lines(messages, is_streaming);
-    let visible_lines = area.height.saturating_sub(2) as u16;
+fn calculate_scroll(area: Rect, lines: &[Line]) -> u16 {
+    let total_lines = lines.len() as u16;
+    let visible_lines = area.height.saturating_sub(1);
 
     if total_lines > visible_lines {
         total_lines.saturating_sub(visible_lines)
@@ -516,84 +651,73 @@ fn calculate_scroll(area: Rect, messages: &Vec<Message>, is_streaming: bool) -> 
     }
 }
 
-/// 估算消息总行数
-fn estimate_total_lines(messages: &Vec<Message>, is_streaming: bool) -> u16 {
-    let mut total: u16 = 0;
-
-    for msg in messages {
-        match msg {
-            Message::User { text } => {
-                total += 2; // header + empty line
-                total += text.lines().count() as u16;
-            }
-            Message::Assistant { text, .. } => {
-                total += 2;
-                total += text.lines().count().max(1) as u16;
-            }
-            Message::ToolCall { args, .. } => {
-                total += 1;
-                total += args.lines().count() as u16;
-            }
-            Message::ToolResult { result, .. } => {
-                total += 2;
-                total += (result.lines().count().min(9)) as u16;
-            }
-            Message::Error { .. } => total += 2,
-            Message::System { .. } => total += 2,
-        }
-    }
-
-    if is_streaming {
-        total += 1;
-    }
-
-    total
-}
-
-/// 渲染状态栏
-fn render_status(f: &mut Frame, area: Rect, app: &App) {
-    let status_text = if app.is_streaming {
-        "⏳ AI 正在回复..."
+/// 渲染提示栏
+fn render_hint(f: &mut Frame, area: Rect, app: &App) {
+    let hint_text = if app.is_streaming {
+        Line::from(vec![
+            Span::styled(" ⏳ ", Style::default().fg(theme::WARNING)),
+            Span::styled("AI 正在回复... 按 Esc 取消", Style::default().fg(theme::FG_DIM)),
+        ])
     } else {
-        "✅ 就绪"
+        Line::from(vec![
+            Span::styled(" 💡 ", Style::default().fg(theme::ACCENT)),
+            Span::styled("提示: ", Style::default().fg(theme::FG_DIM)),
+            Span::styled("Ctrl+C", Style::default().fg(theme::FG)),
+            Span::styled(" 退出, ", Style::default().fg(theme::FG_DIM)),
+            Span::styled("/help", Style::default().fg(theme::FG)),
+            Span::styled(" 查看命令", Style::default().fg(theme::FG_DIM)),
+        ])
     };
 
-    let status = Line::from(vec![
-        Span::styled(status_text, Style::default().fg(
-            if app.is_streaming { Color::Cyan } else { Color::Green }
-        )),
-        Span::raw("  "),
-        Span::styled(
-            format!("消息: {}", app.messages.len()),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
+    let hint = Paragraph::new(hint_text)
+        .style(Style::default().bg(theme::BG));
 
-    f.render_widget(Paragraph::new(status), area);
+    f.render_widget(hint, area);
 }
 
 /// 渲染输入框
 fn render_input(f: &mut Frame, area: Rect, app: &App) {
+    let input_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme::BORDER));
+
     let input_text = if app.is_streaming {
         Line::from(vec![
-            Span::styled(" ⏳ ", Style::default().fg(Color::Yellow)),
-            Span::styled("等待 AI 回复 (按 Esc 取消)...", Style::default().fg(Color::DarkGray)),
+            Span::styled(" ⏳ ", Style::default().fg(theme::WARNING)),
+            Span::styled("等待 AI 回复...", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
         ])
     } else {
         Line::from(vec![
-            Span::styled(" > ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled(app.input.clone(), Style::default().fg(Color::White)),
-            Span::styled("▎", Style::default().fg(Color::Green)), // 光标指示
+            Span::styled(" > ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(app.input.clone(), Style::default().fg(theme::FG)),
+            Span::styled("▎", Style::default().fg(theme::ACCENT)),
         ])
     };
-
-    let input_block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::DarkGray));
 
     let input = Paragraph::new(input_text)
         .block(input_block)
         .wrap(Wrap { trim: false });
 
     f.render_widget(input, area);
+}
+
+/// 创建居中矩形
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

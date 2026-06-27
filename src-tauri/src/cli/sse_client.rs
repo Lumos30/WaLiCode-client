@@ -34,6 +34,7 @@ struct ApiResponse<T> {
 
 #[derive(Debug, Default, Deserialize)]
 struct CreateSessionData {
+    #[serde(rename = "sessionId")]
     session_id: String,
 }
 
