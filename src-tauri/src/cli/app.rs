@@ -176,6 +176,10 @@ pub struct App {
     pub step_counter: usize,
     /// 工作目录
     pub workdir: Option<String>,
+    /// 用户手动滚动偏移（0 = 底部/最新，>0 = 向上偏移若干行）
+    pub scroll_offset: u16,
+    /// 是否处于手动滚动模式（流式输出时自动切回 auto-scroll）
+    pub manual_scroll: bool,
 }
 
 impl App {
@@ -198,6 +202,8 @@ impl App {
             tool_step_map: HashMap::new(),
             step_counter: 0,
             workdir,
+            scroll_offset: 0,
+            manual_scroll: false,
         }
     }
 
@@ -207,6 +213,12 @@ impl App {
             "text" => {
                 let full_text = event.full_text.or(event.content).unwrap_or_default();
                 self.streaming_text = full_text.clone();
+
+                // 新消息到达 → 取消手动滚动，自动跟随底部
+                if self.manual_scroll {
+                    self.manual_scroll = false;
+                    self.scroll_offset = 0;
+                }
 
                 // 更新或创建 Assistant 消息
                 if let Some(last) = self.messages.last_mut() {

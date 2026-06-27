@@ -8,7 +8,7 @@ interface SettingsProps {
   onClose: () => void
 }
 
-type Section = 'general' | 'appearance' | 'terminal' | 'about'
+type Section = 'communication' | 'appearance' | 'general' | 'cli' | 'about'
 
 export function Settings({ open, onClose }: SettingsProps) {
   const { currentTheme, setTheme } = useThemeStore()
@@ -19,10 +19,13 @@ export function Settings({ open, onClose }: SettingsProps) {
   const [inputLang, setInputLang] = useState('简体中文')
   const [inputFont, setInputFont] = useState('JetBrains Mono')
   const [inputFontSize, setInputFontSize] = useState(13)
-  const [section, setSection] = useState<Section>('general')
+  const [section, setSection] = useState<Section>('communication')
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle')
+
+  // CLI 工具状态
   const [cliInstalled, setCliInstalled] = useState(false)
   const [cliLoading, setCliLoading] = useState<'idle' | 'installing' | 'uninstalling'>('idle')
+  const [copied, setCopied] = useState(false)
 
   // ── 可拖拽缩放 ──
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -90,6 +93,7 @@ export function Settings({ open, onClose }: SettingsProps) {
     const onUp = () => {
       dragging.current = false
       window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
     window.addEventListener('mousemove', onMove)
@@ -106,15 +110,35 @@ export function Settings({ open, onClose }: SettingsProps) {
     return () => window.removeEventListener('keydown', handler)
   }, [open, handleCancel])
 
+  /** 复制 walicode-cli 命令 */
+  const handleCopyCli = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText('walicode-cli')
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // 降级：用 execCommand
+      const ta = document.createElement('textarea')
+      ta.value = 'walicode-cli'
+      document.body.appendChild(ta)
+      ta.select()
+      try { document.execCommand('copy') } catch {}
+      document.body.removeChild(ta)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }
+  }, [])
+
   const { colors } = useThemeStore()
   const themeList = (Object.entries(themes) as [ThemeName, typeof themes[ThemeName]][])
 
   if (!open) return null
 
   const sections: { id: Section; label: string; icon: string }[] = [
-    { id: 'general', label: '通用', icon: '⚙️' },
+    { id: 'communication', label: '通信', icon: '⚙️' },
     { id: 'appearance', label: '外观', icon: '🎨' },
-    { id: 'terminal', label: '终端', icon: '💻' },
+    { id: 'general', label: '通用', icon: '💻' },
+    { id: 'cli', label: 'CLI 工具', icon: '⌨️' },
     { id: 'about', label: '关于', icon: 'ℹ️' },
   ]
 
@@ -173,9 +197,10 @@ export function Settings({ open, onClose }: SettingsProps) {
 
           {/* 右侧内容区 */}
           <div className="flex-1 p-8 overflow-y-auto">
-            {section === 'general' && (
+            {/* 通信（原通用） */}
+            {section === 'communication' && (
               <div className="space-y-6">
-                <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>通用设置</h2>
+                <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>通信设置</h2>
 
                 {/* 服务端地址 */}
                 <div>
@@ -222,74 +247,15 @@ export function Settings({ open, onClose }: SettingsProps) {
                     <option>English</option>
                   </select>
                 </div>
-
-                {/* 命令行工具注册 */}
-                <div>
-                  <label className="block text-[13px] mb-2" style={{ color: colors.textDim }}>命令行工具</label>
-                  <div className="flex items-center gap-3">
-                    {cliInstalled ? (
-                      <>
-                        <span className="text-[13px]" style={{ color: colors.green }}>✓ walicode-cli 命令已注册</span>
-                        <button
-                          onClick={async () => {
-                            setCliLoading('uninstalling')
-                            try {
-                              await invoke<string>('uninstall_cli_command')
-                              setCliInstalled(false)
-                            } catch (e) {
-                              alert(`移除失败: ${e}。可能需要管理员权限。`)
-                            }
-                            setCliLoading('idle')
-                          }}
-                          disabled={cliLoading !== 'idle'}
-                          className="px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors"
-                          style={{
-                            backgroundColor: colors.bgTertiary,
-                            border: `1px solid ${colors.border}`,
-                            color: colors.textSecondary,
-                            cursor: cliLoading !== 'idle' ? 'not-allowed' : 'pointer',
-                          }}
-                        >
-                          移除
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={async () => {
-                          setCliLoading('installing')
-                          try {
-                            await invoke<string>('install_cli_command')
-                            setCliInstalled(true)
-                          } catch (e) {
-                            alert(`注册失败: ${e}。可能需要管理员权限。`)
-                          }
-                          setCliLoading('idle')
-                        }}
-                        disabled={cliLoading !== 'idle'}
-                        className="px-4 py-2 rounded-md text-[13px] font-medium transition-colors"
-                        style={{
-                          backgroundColor: cliLoading === 'idle' ? colors.accent : colors.bgTertiary,
-                          color: cliLoading === 'idle' ? '#fff' : colors.textDim,
-                          cursor: cliLoading !== 'idle' ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        {cliLoading === 'installing' ? '注册中...' : '注册 walicode-cli 命令到 PATH'}
-                      </button>
-                    )}
-                  </div>
-                  <p className="mt-1.5 text-[12px]" style={{ color: colors.textDim }}>
-                    注册后可在终端输入 <code className="px-1 py-0.5 rounded text-[11px]" style={{ backgroundColor: colors.bgInput, color: colors.accent }}>walicode-cli</code> 直接启动应用
-                  </p>
-                </div>
               </div>
             )}
 
+            {/* 外观 */}
             {section === 'appearance' && (
               <div className="space-y-6">
                 <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>外观设置</h2>
                 <div className="grid grid-cols-2 gap-4">
                   {themeList.map(([name, config]) => {
-                    // system 主题用当前实际 colors 展示预览
                     const previewColors = name === 'system' ? colors : config.colors
                     return (
                     <button
@@ -317,9 +283,10 @@ export function Settings({ open, onClose }: SettingsProps) {
               </div>
             )}
 
-            {section === 'terminal' && (
+            {/* 通用（原终端） */}
+            {section === 'general' && (
               <div className="space-y-6">
-                <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>终端设置</h2>
+                <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>通用设置</h2>
 
                 {/* 字体 */}
                 <div>
@@ -355,6 +322,127 @@ export function Settings({ open, onClose }: SettingsProps) {
               </div>
             )}
 
+            {/* CLI 工具（独立栏目） */}
+            {section === 'cli' && (
+              <div className="space-y-6">
+                <h2 className="text-[15px] font-semibold" style={{ color: colors.text }}>CLI 工具</h2>
+
+                {/* 配置区 */}
+                <div
+                  className="p-4 rounded-lg space-y-3"
+                  style={{ backgroundColor: colors.bgInput, border: `1px solid ${colors.border}` }}
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-[14px] font-semibold" style={{ color: colors.text }}>walicode-cli</span>
+                    {cliInstalled ? (
+                      <span
+                        className="px-2 py-0.5 rounded text-[11px] font-medium"
+                        style={{ backgroundColor: colors.green + '22', color: colors.green }}
+                      >
+                        已注册
+                      </span>
+                    ) : (
+                      <span
+                        className="px-2 py-0.5 rounded text-[11px] font-medium"
+                        style={{ backgroundColor: colors.textDim + '22', color: colors.textDim }}
+                      >
+                        未注册
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[12px]" style={{ color: colors.textDim }}>
+                    将 <code className="px-1 py-0.5 rounded text-[11px]" style={{ backgroundColor: colors.bgSecondary, color: colors.accent }}>walicode-cli</code> 注册到系统 PATH，终端中可直接启动应用。
+                  </p>
+                  <div className="flex items-center gap-2 pt-1">
+                    {cliInstalled ? (
+                      <button
+                        onClick={async () => {
+                          setCliLoading('uninstalling')
+                          try {
+                            await invoke<string>('uninstall_cli_command')
+                            setCliInstalled(false)
+                          } catch (e) {
+                            alert(`移除失败: ${e}。可能需要管理员权限。`)
+                          }
+                          setCliLoading('idle')
+                        }}
+                        disabled={cliLoading !== 'idle'}
+                        className="px-4 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                        style={{
+                          backgroundColor: colors.bgTertiary,
+                          border: `1px solid ${colors.border}`,
+                          color: colors.textSecondary,
+                          cursor: cliLoading !== 'idle' ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {cliLoading === 'uninstalling' ? '移除中...' : '移除命令'}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          setCliLoading('installing')
+                          try {
+                            await invoke<string>('install_cli_command')
+                            setCliInstalled(true)
+                          } catch (e) {
+                            alert(`注册失败: ${e}。可能需要管理员权限。`)
+                          }
+                          setCliLoading('idle')
+                        }}
+                        disabled={cliLoading !== 'idle'}
+                        className="px-4 py-1.5 rounded-md text-[12px] font-medium transition-colors"
+                        style={{
+                          backgroundColor: cliLoading === 'idle' ? colors.accent : colors.bgTertiary,
+                          color: cliLoading === 'idle' ? '#fff' : colors.textDim,
+                          cursor: cliLoading !== 'idle' ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        {cliLoading === 'installing' ? '安装中...' : '点击安装'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 使用说明区 */}
+                <div
+                  className="p-4 rounded-lg space-y-3"
+                  style={{ backgroundColor: colors.bgInput, border: `1px solid ${colors.border}` }}
+                >
+                  <h3 className="text-[13px] font-semibold" style={{ color: colors.text }}>使用说明</h3>
+                  <p className="text-[13px]" style={{ color: colors.textSecondary }}>
+                    安装 <code className="px-1 py-0.5 rounded text-[11px]" style={{ backgroundColor: colors.bgSecondary, color: colors.accent }}>walicode-cli</code> 后，可在任意终端使用以下命令：
+                  </p>
+
+                  {/* 命令块：点击整块复制 */}
+                  <button
+                    onClick={handleCopyCli}
+                    className="w-full flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-md text-left transition-colors group hover:brightness-110"
+                    style={{
+                      backgroundColor: colors.bgSecondary,
+                      border: `1px solid ${colors.border}`,
+                    }}
+                  >
+                    <code className="text-[13px] font-mono" style={{ color: colors.text }}>
+                      $ walicode-cli
+                    </code>
+                    <span
+                      className="text-[11px] font-medium shrink-0 transition-colors"
+                      style={{ color: copied ? colors.green : colors.textDim }}
+                    >
+                      {copied ? '✓ 已复制' : '点击复制'}
+                    </span>
+                  </button>
+
+                  <ul className="text-[12px] space-y-1.5 pt-1" style={{ color: colors.textDim }}>
+                    <li>• 在系统任意终端输入 <code style={{ color: colors.accent }}>walicode-cli</code> 即可启动 WaLiCode</li>
+                    <li>• 支持 macOS / Linux（写入 <code style={{ color: colors.accent }}>~/.local/bin</code>）</li>
+                    <li>• 需重启终端或执行 <code style={{ color: colors.accent }}>source ~/.zshrc</code> 让 PATH 生效</li>
+                  </ul>
+                </div>
+              </div>
+            )}
+
+            {/* 关于 */}
             {section === 'about' && (
               <div className="flex flex-col items-center py-10">
                 <img src="/logo.png" alt="WaLiCode" className="w-20 h-20 rounded-xl mb-4" />
