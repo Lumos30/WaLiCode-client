@@ -313,10 +313,42 @@ function replaceAndStoreJS(text: string, pattern: RegExp, store: string[], prefi
 function restoreElements(text: string, store: string[]): string {
   let r = text
   for (let i = store.length - 1; i >= 0; i--) {
-    r = r.replace(CB_PREFIX + i + CB_SUFFIX, store[i])
+    // 清理代码块内容开头的垃圾文本（飞书/语雀导出的"复制"按钮文字）
+    const cleaned = stripCopyLabelFromCodeBlockJS(store[i])
+    r = r.replace(CB_PREFIX + i + CB_SUFFIX, cleaned)
     r = r.replace(IC_PREFIX + i + CB_SUFFIX, store[i])
   }
   return r
+}
+
+/**
+ * 清理代码块内容开头的"复制"垃圾行。
+ * 飞书/语雀等富文本编辑器导出 Markdown 时，将"复制代码"按钮文字写入代码块：
+ * ```text
+ * 复制
+ * 真正的代码内容...
+ * ```
+ * 与后端 stripCopyLabelFromCodeBlock 对齐
+ */
+function stripCopyLabelFromCodeBlockJS(codeBlock: string): string {
+  if (!codeBlock.startsWith('```')) return codeBlock
+  const firstNewline = codeBlock.indexOf('\n')
+  if (firstNewline < 0) return codeBlock
+  const content = codeBlock.substring(firstNewline + 1)
+  const secondNewline = content.indexOf('\n')
+  let firstLine: string
+  let rest: string
+  if (secondNewline < 0) {
+    firstLine = content.trim()
+    rest = ''
+  } else {
+    firstLine = content.substring(0, secondNewline).trim()
+    rest = content.substring(secondNewline + 1)
+  }
+  if (firstLine === '复制' || firstLine === 'Copy' || firstLine === '复制代码') {
+    return codeBlock.substring(0, firstNewline + 1) + rest
+  }
+  return codeBlock
 }
 
 /**
@@ -819,11 +851,14 @@ function normalizeMarkdown(text: string): string {
   r = r.replace(/(\d{1,2})\.([^\s\d\n.])/g, '$1. $2')
 
   // 2h0. 无序列表标记后补空格（中文场景）
-  r = r.replace(/([-*+])([\u4e00-\u9fa5])/g, '$1 $2')
+  // 排除连字符场景：字母/数字后的 - 是连字符而非列表标记（如 x64-架构）
+  r = r.replace(/(?<![a-zA-Z0-9\u0001])([-*+])([\u4e00-\u9fa5])/g, '$1 $2')
   // 2h0-en. 列表标记后紧跟英文大写字母也补空格（类名/文件名通常大写开头）
-  r = r.replace(/([-*+])([A-Z])/g, '$1 $2')
+  // 排除连字符场景：字母/数字后的 - 是连字符而非列表标记（xfg-wrench、JSON-RPC、UTF-8）
+  r = r.replace(/(?<![a-zA-Z0-9\u0001])([-*+])([A-Z])/g, '$1 $2')
   // 2h0-en2. 列表标记后紧跟小写字母+中文混合内容时补空格（排除纯英文连字符如 self-contained）
-  r = r.replace(/([-*+])([a-z]+)([\u4e00-\u9fa5])/g, '$1 $2$3')
+  // 排除连字符场景：字母/数字后的 - 是连字符而非列表标记（xfg-wrench框架）
+  r = r.replace(/(?<![a-zA-Z0-9\u0001])([-*+])([a-z]+)([\u4e00-\u9fa5])/g, '$1 $2$3')
   // 2h0-ext. 列表标记后紧跟 IC 占位符也补空格
   r = r.replace(/([-*+])(\u0001IC)/g, '$1 $2')
 
