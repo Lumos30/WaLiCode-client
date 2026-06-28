@@ -130,34 +130,40 @@ mod theme {
     use ratatui::style::Color;
 
     // 背景层次
-    pub const BG: Color = Color::Rgb(24, 24, 28);
-    pub const BG_INPUT: Color = Color::Rgb(32, 32, 36);
-    pub const BG_PANEL: Color = Color::Rgb(28, 28, 32);
+    pub const BG: Color = Color::Rgb(60, 60, 66);
+
 
     // 灰度层次（高对比 → 低对比）
-    pub const FG: Color = Color::Rgb(220, 220, 226);
-    pub const FG_DIM: Color = Color::Rgb(140, 140, 150);
-    pub const FG_MUTED: Color = Color::Rgb(100, 100, 110);
-    pub const FG_PLACEHOLDER: Color = Color::Rgb(115, 115, 125);
+    pub const FG: Color = Color::White;
+    pub const FG_DIM: Color = Color::Rgb(200, 202, 208);
+    pub const FG_MUTED: Color = Color::Rgb(170, 172, 180);
+    pub const FG_PLACEHOLDER: Color = Color::Rgb(175, 177, 185);
 
-    // 边框（极低对比，融入背景）
-    pub const BORDER: Color = Color::Rgb(54, 54, 60);
-    pub const BORDER_FOCUS: Color = Color::Rgb(80, 150, 230);
+    // 边框
+    pub const BORDER: Color = Color::Rgb(90, 90, 98);
+    pub const BORDER_FOCUS: Color = Color::Rgb(110, 180, 255);
 
     // 蓝色：主强调（标题、链接、工具名、输入提示）
-    pub const ACCENT: Color = Color::Rgb(80, 155, 240);
+    pub const ACCENT: Color = Color::Rgb(100, 175, 250);
     // 橙色：标记色（Thought、Tip、进行中）
-    pub const ORANGE: Color = Color::Rgb(234, 155, 65);
+    pub const ORANGE: Color = Color::Rgb(240, 170, 80);
 
     // 状态
-    pub const SUCCESS: Color = Color::Rgb(74, 195, 115);
-    pub const ERROR: Color = Color::Rgb(215, 75, 75);
+    pub const SUCCESS: Color = Color::Rgb(90, 210, 130);
+    pub const ERROR: Color = Color::Rgb(230, 90, 90);
     #[allow(dead_code)]
-    pub const WARNING: Color = Color::Rgb(235, 175, 55);
+    pub const WARNING: Color = Color::Rgb(245, 185, 65);
 
     // 输入区
-    pub const INPUT_PROMPT: Color = Color::Rgb(80, 155, 240);
-    pub const INPUT_CURSOR: Color = Color::Rgb(80, 155, 240);
+    pub const INPUT_PROMPT: Color = Color::Rgb(100, 175, 250);
+    pub const INPUT_CURSOR: Color = Color::Rgb(100, 175, 250);
+
+    // 右侧面板（浅灰底 + 深色字）
+    pub const PANEL_BG: Color = Color::Rgb(215, 215, 222);
+    pub const PANEL_FG: Color = Color::Rgb(50, 50, 56);
+    pub const PANEL_DIM: Color = Color::Rgb(110, 110, 120);
+    pub const PANEL_MUTED: Color = Color::Rgb(150, 152, 160);
+    pub const PANEL_SEP: Color = Color::Rgb(180, 182, 190);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -439,13 +445,13 @@ fn render_welcome(f: &mut Frame, app: &App) {
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER_FOCUS))
-        .style(Style::default().bg(theme::BG_INPUT));
+        .style(Style::default().bg(theme::BG));
     f.render_widget(input_block, input_area);
 
     let input_inner = Rect {
-        x: input_area.x + 2,
+        x: input_area.x + 3,
         y: input_area.y + 1,
-        width: input_area.width.saturating_sub(4),
+        width: input_area.width.saturating_sub(5),
         height: input_area.height.saturating_sub(2),
     };
 
@@ -476,7 +482,8 @@ fn render_welcome(f: &mut Frame, app: &App) {
         lines
     };
 
-    let input_widget = Paragraph::new(input_display);
+    let input_widget = Paragraph::new(input_display)
+        .style(Style::default().fg(theme::FG).bg(theme::BG));
     f.render_widget(input_widget, input_inner);
 
     // 3. 快捷提示
@@ -518,6 +525,7 @@ fn render_chat(f: &mut Frame, app: &App) {
     ]).split(size);
 
     // 水平分割消息区：左消息 + 右面板
+    let pad: u16 = 1;
     let panel_w = if size.width > 80 { PANEL_WIDTH } else { 0 };
     let msg_w = size.width.saturating_sub(panel_w);
     let mid_chunks = Layout::horizontal([
@@ -525,7 +533,11 @@ fn render_chat(f: &mut Frame, app: &App) {
         Constraint::Length(panel_w),
     ]).split(main_chunks[0]);
 
-    render_messages(f, mid_chunks[0], app);
+    // 先填充消息区背景，再在内部偏移渲染内容
+    let msg_bg = Block::default().style(Style::default().bg(theme::BG));
+    f.render_widget(msg_bg, mid_chunks[0]);
+    let msg_area = Rect { x: mid_chunks[0].x + pad, width: mid_chunks[0].width.saturating_sub(pad), ..mid_chunks[0] };
+    render_messages(f, msg_area, app);
     if panel_w > 0 {
         render_right_panel(f, mid_chunks[1], app);
     }
@@ -676,6 +688,7 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     let total_lines = lines.len() as u16;
 
     let messages_widget = Paragraph::new(lines)
+        .style(Style::default().fg(theme::FG).bg(theme::BG))
         .scroll((scroll, 0));
 
     f.render_widget(messages_widget, area);
@@ -703,11 +716,9 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER_FOCUS))
-        .style(Style::default().bg(theme::BG_INPUT))
-        .title(" Input ")
-        .title_alignment(Alignment::Left);
-
-    let inner = input_block.inner(area);
+        .style(Style::default().bg(theme::BG));
+    let raw_inner = input_block.inner(area);
+    let inner = Rect { x: raw_inner.x + 1, width: raw_inner.width.saturating_sub(1), ..raw_inner };
     f.render_widget(input_block, area);
 
     if app.is_streaming {
@@ -715,7 +726,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
             Span::styled(" ◐ ", Style::default().fg(theme::ORANGE)),
             Span::styled("AI 回复中... Esc 取消", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
         ]))
-        .style(Style::default().bg(theme::BG_INPUT));
+        .style(Style::default().fg(theme::FG).bg(theme::BG));
         f.render_widget(waiting, inner);
     } else {
         let (cursor_line, cursor_col) = app.cursor_pos;
@@ -760,7 +771,7 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         }
 
         let input = Paragraph::new(input_render_lines)
-            .style(Style::default().bg(theme::BG_INPUT))
+            .style(Style::default().fg(theme::FG).bg(theme::BG))
             .wrap(Wrap { trim: false });
         f.render_widget(input, inner);
     }
@@ -832,12 +843,12 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
-    // 面板背景 + 左边框分隔线
-    let panel_bg = Block::default()
+    // 浅灰面板背景 + 左边细分隔线
+    let panel = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme::BORDER))
-        .style(Style::default().bg(theme::BG_PANEL));
-    f.render_widget(panel_bg, area);
+        .border_style(Style::default().fg(theme::PANEL_SEP))
+        .style(Style::default().bg(theme::PANEL_BG));
+    f.render_widget(panel, area);
 
     let inner = Rect {
         x: area.x + 2,
@@ -845,47 +856,12 @@ fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
         width: area.width.saturating_sub(3),
         height: area.height.saturating_sub(2),
     };
-    if inner.height < 3 || inner.width < 3 {
+    if inner.height < 3 || inner.width < 5 {
         return;
     }
 
-    let mut rows: Vec<Line> = Vec::new();
-
-    // ── 连接状态 ──
     let session_ok = app.session_id.is_some();
-    rows.push(Line::from(vec![
-        Span::styled(
-            if session_ok { "● " } else { "○ " },
-            Style::default().fg(if session_ok { theme::SUCCESS } else { theme::FG_MUTED }),
-        ),
-        Span::styled(
-            if session_ok { "已连接" } else { "未连接" },
-            Style::default().fg(theme::FG),
-        ),
-    ]));
-    rows.push(Line::from(""));
 
-    // ── 会话 ──
-    rows.push(Line::from(vec![
-        Span::styled("会话", Style::default().fg(theme::FG_MUTED)),
-    ]));
-    let sid = app.session_id.as_deref().unwrap_or("-");
-    let sid_short = if sid.len() > 16 { format!("{}..", &sid[..16]) } else { sid.to_string() };
-    rows.push(Line::from(vec![
-        Span::styled(sid_short, Style::default().fg(theme::FG_DIM)),
-    ]));
-    rows.push(Line::from(""));
-
-    // ── 智能体 ──
-    rows.push(Line::from(vec![
-        Span::styled("智能体", Style::default().fg(theme::FG_MUTED)),
-    ]));
-    rows.push(Line::from(vec![
-        Span::styled(&app.agent_id, Style::default().fg(theme::ACCENT)),
-    ]));
-    rows.push(Line::from(""));
-
-    // ── 统计 ──
     let msg_count = app.messages.len();
     let total_chars: usize = app.messages.iter().map(|m| match m {
         Message::User { text } => text.len(),
@@ -909,42 +885,39 @@ fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
         format!("{}", total_chars)
     };
 
-    rows.push(Line::from(vec![
-        Span::styled("消息", Style::default().fg(theme::FG_MUTED)),
-        Span::styled(format!("  {}", msg_count), Style::default().fg(theme::FG)),
-    ]));
-    rows.push(Line::from(vec![
-        Span::styled("Token", Style::default().fg(theme::FG_MUTED)),
-        Span::styled(format!(" {}", token_display), Style::default().fg(theme::FG)),
-    ]));
-    rows.push(Line::from(""));
+    let sid = app.session_id.as_deref().unwrap_or("-");
+    let sid_short = if sid.len() > 12 { format!("{}..", &sid[..12]) } else { sid.to_string() };
 
-    // ── 工作目录 ──
-    if let Some(ref wd) = app.workdir {
-        rows.push(Line::from(vec![
-            Span::styled("目录", Style::default().fg(theme::FG_MUTED)),
-        ]));
-        let dir_short = wd.split('/').last().unwrap_or(wd);
-        rows.push(Line::from(vec![
-            Span::styled(dir_short, Style::default().fg(theme::FG_DIM)),
-        ]));
-    }
+    let rows = vec![
+        Line::from(vec![
+            Span::styled(if session_ok { "●" } else { "○" },
+                Style::default().fg(if session_ok { theme::SUCCESS } else { theme::PANEL_MUTED })),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("session", Style::default().fg(theme::PANEL_MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled(sid_short, Style::default().fg(theme::PANEL_DIM)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("agent", Style::default().fg(theme::PANEL_MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled(&app.agent_id, Style::default().fg(theme::PANEL_FG)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("{} msgs", msg_count), Style::default().fg(theme::PANEL_DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled(token_display, Style::default().fg(theme::PANEL_MUTED)),
+        ]),
+    ];
 
-    // ── 快捷键提示 ──
-    rows.push(Line::from(""));
-    rows.push(Line::from(vec![
-        Span::styled("───", Style::default().fg(theme::BORDER)),
-    ]));
-    rows.push(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(theme::FG_DIM)),
-        Span::styled(" 取消", Style::default().fg(theme::FG_MUTED)),
-    ]));
-    rows.push(Line::from(vec![
-        Span::styled("↑↓", Style::default().fg(theme::FG_DIM)),
-        Span::styled(" 历史", Style::default().fg(theme::FG_MUTED)),
-    ]));
-
-    let content = Paragraph::new(rows);
+    let content = Paragraph::new(rows)
+        .style(Style::default().fg(theme::PANEL_FG).bg(theme::PANEL_BG));
     f.render_widget(content, inner);
 }
 
