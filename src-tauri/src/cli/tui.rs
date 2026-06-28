@@ -124,46 +124,45 @@ fn render_code_in_box(highlighted: Vec<Line<'static>>, lang: &str, term_width: u
     result
 }
 
-/// ── 主题：精修暗色系，对标 OpenCode 精致感 ──
-/// 低对比、暖暗底、蓝橙点缀、信息层次分明
+/// ── 主题：温暖低对比、不刺眼 ──
+/// 暖底色、低饱和、无纯白、柔和过渡
 mod theme {
     use ratatui::style::Color;
 
-    // 背景层次
-    pub const BG: Color = Color::Rgb(60, 60, 66);
+    // ── 主背景：暖深灰 ──
+    pub const BG: Color = Color::Rgb(30, 31, 35);
 
+    // ── 前景：暖白→柔和灰（无纯白） ──
+    pub const FG: Color = Color::Rgb(200, 202, 208);
+    pub const FG_DIM: Color = Color::Rgb(155, 157, 165);
+    pub const FG_MUTED: Color = Color::Rgb(120, 122, 130);
+    pub const FG_PLACEHOLDER: Color = Color::Rgb(140, 142, 150);
 
-    // 灰度层次（高对比 → 低对比）
-    pub const FG: Color = Color::White;
-    pub const FG_DIM: Color = Color::Rgb(200, 202, 208);
-    pub const FG_MUTED: Color = Color::Rgb(170, 172, 180);
-    pub const FG_PLACEHOLDER: Color = Color::Rgb(175, 177, 185);
-
-    // 边框
-    pub const BORDER: Color = Color::Rgb(90, 90, 98);
-    pub const BORDER_FOCUS: Color = Color::Rgb(110, 180, 255);
-
-    // 蓝色：主强调（标题、链接、工具名、输入提示）
-    pub const ACCENT: Color = Color::Rgb(100, 175, 250);
-    // 橙色：标记色（Thought、Tip、进行中）
-    pub const ORANGE: Color = Color::Rgb(240, 170, 80);
-
-    // 状态
-    pub const SUCCESS: Color = Color::Rgb(90, 210, 130);
-    pub const ERROR: Color = Color::Rgb(230, 90, 90);
+    // ── 边框：极低存在感 ──
     #[allow(dead_code)]
-    pub const WARNING: Color = Color::Rgb(245, 185, 65);
+    pub const BORDER: Color = Color::Rgb(48, 49, 54);
+    pub const BORDER_FOCUS: Color = Color::Rgb(78, 145, 210);
 
-    // 输入区
-    pub const INPUT_PROMPT: Color = Color::Rgb(100, 175, 250);
-    pub const INPUT_CURSOR: Color = Color::Rgb(100, 175, 250);
+    // ── 强调色：低饱和 ──
+    pub const ACCENT: Color = Color::Rgb(78, 148, 212);
+    pub const ORANGE: Color = Color::Rgb(208, 148, 62);
 
-    // 右侧面板（浅灰底 + 深色字）
-    pub const PANEL_BG: Color = Color::Rgb(215, 215, 222);
-    pub const PANEL_FG: Color = Color::Rgb(50, 50, 56);
-    pub const PANEL_DIM: Color = Color::Rgb(110, 110, 120);
-    pub const PANEL_MUTED: Color = Color::Rgb(150, 152, 160);
-    pub const PANEL_SEP: Color = Color::Rgb(180, 182, 190);
+    // ── 状态 ──
+    pub const SUCCESS: Color = Color::Rgb(68, 175, 110);
+    pub const ERROR: Color = Color::Rgb(196, 78, 78);
+    #[allow(dead_code)]
+    pub const WARNING: Color = Color::Rgb(218, 173, 58);
+
+    // ── 输入区 ──
+    pub const INPUT_PROMPT: Color = Color::Rgb(78, 148, 212);
+    pub const INPUT_CURSOR: Color = Color::Rgb(78, 148, 212);
+
+    // ── 右侧面板：暖浅灰 ──
+    pub const PANEL_BG: Color = Color::Rgb(215, 216, 222);
+    pub const PANEL_FG: Color = Color::Rgb(50, 51, 56);
+    pub const PANEL_DIM: Color = Color::Rgb(115, 116, 125);
+    pub const PANEL_MUTED: Color = Color::Rgb(155, 156, 165);
+    pub const PANEL_SEP: Color = Color::Rgb(185, 186, 194);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -259,8 +258,17 @@ async fn run_tui(args: CliArgs) {
         return;
     }
 
+    // panic 时自动恢复终端（进入 alternate screen 前注册）
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        prev_hook(info);
+    }));
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture).expect("Failed to enter alternate screen");
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
     terminal.clear().expect("Failed to clear terminal");
@@ -339,6 +347,7 @@ async fn run_tui(args: CliArgs) {
         }
     }
 
+    let _ = std::panic::take_hook(); // 丢弃我们设的 hook
     restore_terminal(&mut terminal);
 }
 
@@ -689,23 +698,24 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
 
     let messages_widget = Paragraph::new(lines)
         .style(Style::default().fg(theme::FG).bg(theme::BG))
-        .scroll((scroll, 0));
+        .scroll((scroll, 0))
+        .wrap(Wrap { trim: false });
 
     f.render_widget(messages_widget, area);
 
-    // 滚动条（内容超出一屏时显示）
-    if total_lines > area.height {
-        let scrollbar = Scrollbar::default()
-            .orientation(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
-            .position(scroll as usize)
-            .viewport_content_length(area.height as usize);
-        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
-    }
+    // 滚动条（始终渲染，不闪烁；轨道消失，滑块柔和）
+    let scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("░"))
+        .thumb_symbol("▓")
+        .style(Style::default().fg(theme::FG_MUTED))
+        .thumb_style(Style::default().fg(theme::FG_DIM));
+    let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
+        .position(scroll as usize)
+        .viewport_content_length(area.height as usize);
+    f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
