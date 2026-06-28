@@ -132,6 +132,8 @@ pub enum Message {
     Error { text: String },
     /// 系统消息（轮次信息等）
     System { text: String },
+    /// 文件变更摘要
+    Diff { summary: ChangeSummary },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,6 +310,12 @@ pub struct App {
     pub manual_scroll: bool,
     /// 输入历史
     pub input_history: InputHistory,
+    /// 命令面板是否开启
+    pub command_palette_open: bool,
+    /// 命令面板搜索过滤文本
+    pub command_palette_filter: String,
+    /// 命令面板选中项索引
+    pub command_palette_selection: usize,
 }
 
 impl App {
@@ -334,6 +342,9 @@ impl App {
             scroll_offset: 0,
             manual_scroll: false,
             input_history: InputHistory::new(1000),
+            command_palette_open: false,
+            command_palette_filter: String::new(),
+            command_palette_selection: 0,
         }
     }
 
@@ -572,17 +583,7 @@ impl App {
                 // 如果有 changeSummary，显示变更摘要
                 if let Some(cs) = event.change_summary {
                     if !cs.modified.is_empty() || !cs.created.is_empty() || !cs.deleted.is_empty() {
-                        let mut summary = String::from("📝 文件变更:\n");
-                        for f in &cs.created {
-                            summary.push_str(&format!("  ✨ 创建: {}\n", f.path));
-                        }
-                        for f in &cs.modified {
-                            summary.push_str(&format!("  ✏️ 修改: {}\n", f.path));
-                        }
-                        for f in &cs.deleted {
-                            summary.push_str(&format!("  🗑 删除: {}\n", f.path));
-                        }
-                        self.messages.push(Message::System { text: summary });
+                        self.messages.push(Message::Diff { summary: cs });
                     }
                 }
             }

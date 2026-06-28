@@ -345,8 +345,8 @@ fn execute_local_command_internal(
     let output = cmd.output()
         .map_err(|e| format!("Failed to execute: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = strip_ansi_codes(&String::from_utf8_lossy(&output.stdout));
+    let stderr = strip_ansi_codes(&String::from_utf8_lossy(&output.stderr));
     let exit_code = output.status.code().unwrap_or(-1);
 
     Ok(LocalCommandResult {
@@ -365,4 +365,31 @@ struct LocalCommandResult {
     exit_code: i32,
     success: bool,
     _duration_ms: u64,
+}
+
+/// 去除 ANSI 转义序列（颜色码等）
+fn strip_ansi_codes(s: &str) -> String {
+    // 匹配 ESC[...m 格式的 ANSI 序列
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // 遇到 ESC，检查是否是 CSI 序列 ESC[...m
+            if chars.peek() == Some(&'[') {
+                chars.next(); // 跳过 '['
+                // 跳过所有参数直到 'm'
+                while let Some(&c) = chars.peek() {
+                    chars.next();
+                    if c == 'm' {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        result.push(ch);
+    }
+    
+    result
 }
