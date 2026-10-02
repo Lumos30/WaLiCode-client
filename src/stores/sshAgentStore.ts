@@ -134,6 +134,9 @@ interface SshAgentStore {
   /** 获取当前会话的绑定 */
   getBindingByChatSession: (chatSessionId: string) => SshAgentBinding | undefined
 
+  /** 会话内部修订后迁移本地绑定索引；服务端已同步复制绑定。 */
+  rekeyBinding: (sourceSessionId: string, revisedSessionId: string) => void
+
   /** 格式化服务器信息为对话上下文 */
   formatServerContext: (binding: SshAgentBinding) => string
 }
@@ -294,6 +297,21 @@ export const useSshAgentStore = create<SshAgentStore>((set, get) => ({
   getBindingByChatSession: (chatSessionId) => {
     return get().bindings.get(chatSessionId)
   },
+
+  rekeyBinding: (sourceSessionId, revisedSessionId) => set((state) => {
+    const source = state.bindings.get(sourceSessionId)
+    if (!source) return {}
+    const revised = { ...source, chatSessionId: revisedSessionId }
+    const bindings = new Map(state.bindings)
+    bindings.delete(sourceSessionId)
+    bindings.set(revisedSessionId, revised)
+    return {
+      bindings,
+      activeBinding: state.activeBinding?.chatSessionId === sourceSessionId
+        ? revised
+        : state.activeBinding,
+    }
+  }),
 
   formatServerContext: (binding) => {
     const { serverInfo, connectionName } = binding

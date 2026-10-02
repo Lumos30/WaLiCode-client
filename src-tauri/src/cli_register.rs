@@ -4,12 +4,17 @@
 //! 注册后终端输入 `walicode-cli` 即可启动应用。
 //! 参考 VS Code 的 `Shell Command: Install 'code' command in PATH`。
 
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 
 /// macOS 上 symlink 的目标路径
+#[cfg(unix)]
 const SYMLINK_PATH: &str = "/usr/local/bin/walicode-cli";
 
 /// 安装 CLI 命令到 PATH
@@ -17,12 +22,14 @@ const SYMLINK_PATH: &str = "/usr/local/bin/walicode-cli";
 /// 1. 找到同目录下的 walicode-cli 二进制（独立 CLI TUI 入口）
 /// 2. 尝试直接创建 symlink（/usr/local/bin 可写时）
 /// 3. 如果权限不足，通过 osascript 弹出系统授权框
+#[cfg(unix)]
 #[tauri::command]
 pub fn install_cli_command() -> Result<String, String> {
     // current_exe 是 Tauri GUI 二进制 (walissh-client)，
     // CLI 二进制 (walicode-cli) 在同目录下
     let gui_path = std::env::current_exe().map_err(|e| format!("获取应用路径失败: {}", e))?;
-    let cli_path = gui_path.parent()
+    let cli_path = gui_path
+        .parent()
         .ok_or_else(|| "无法获取父目录".to_string())?
         .join("walicode-cli");
 
@@ -51,7 +58,15 @@ pub fn install_cli_command() -> Result<String, String> {
     install_with_elevation(&app_path)
 }
 
+/// Windows 打包会提供 `walicode-cli.exe`，但 M1 不包含全局 PATH 注册。
+#[cfg(not(unix))]
+#[tauri::command]
+pub fn install_cli_command() -> Result<String, String> {
+    Err("Windows 暂不支持从 GUI 注册全局 PATH；请直接运行 walicode-cli.exe。".to_string())
+}
+
 /// 移除 PATH 中的 CLI 命令
+#[cfg(unix)]
 #[tauri::command]
 pub fn uninstall_cli_command() -> Result<String, String> {
     let symlink_path = PathBuf::from(SYMLINK_PATH);
@@ -69,16 +84,30 @@ pub fn uninstall_cli_command() -> Result<String, String> {
     uninstall_with_elevation()
 }
 
+#[cfg(not(unix))]
+#[tauri::command]
+pub fn uninstall_cli_command() -> Result<String, String> {
+    Ok("Windows 未注册全局 walicode-cli 命令。".to_string())
+}
+
 /// 检查 CLI 命令是否已注册
+#[cfg(unix)]
 #[tauri::command]
 pub fn check_cli_installed() -> bool {
     let symlink_path = PathBuf::from(SYMLINK_PATH);
     symlink_path.is_symlink() || symlink_path.exists()
 }
 
+#[cfg(not(unix))]
+#[tauri::command]
+pub fn check_cli_installed() -> bool {
+    false
+}
+
 // ── 内部实现 ──
 
 /// 尝试直接创建 symlink（无 sudo）
+#[cfg(unix)]
 fn try_direct_install(app_path: &PathBuf) -> bool {
     // 先删除已存在的文件/symlink（可能指向旧版本）
     if PathBuf::from(SYMLINK_PATH).exists() || PathBuf::from(SYMLINK_PATH).is_symlink() {
@@ -91,6 +120,7 @@ fn try_direct_install(app_path: &PathBuf) -> bool {
 }
 
 /// 通过 osascript 弹出 macOS 系统授权框来创建 symlink
+#[cfg(unix)]
 fn install_with_elevation(app_path: &PathBuf) -> Result<String, String> {
     // 使用 ln -sf 强制创建/替换 symlink
     let script = format!(
@@ -113,11 +143,13 @@ fn install_with_elevation(app_path: &PathBuf) -> Result<String, String> {
 }
 
 /// 尝试直接删除 symlink（无 sudo）
+#[cfg(unix)]
 fn try_direct_uninstall() -> bool {
     fs::remove_file(SYMLINK_PATH).is_ok()
 }
 
 /// 通过 osascript 弹出 macOS 系统授权框来删除 symlink
+#[cfg(unix)]
 fn uninstall_with_elevation() -> Result<String, String> {
     let script = format!(
         "do shell script \"rm -f {}\" with administrator privileges",

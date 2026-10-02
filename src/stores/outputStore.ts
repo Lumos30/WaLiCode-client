@@ -21,6 +21,8 @@ interface OutputState {
   entries: OutputEntry[]
   addEntry: (entry: Omit<OutputEntry, 'id' | 'timestamp'>) => string
   updateEntry: (sessionId: string, patch: Partial<OutputEntry>) => void
+  /** Mark commands without a terminal tool result as failed when their stream closes. */
+  markRunningEntriesAsUnconfirmed: () => void
   removeEntry: (id: string) => void
   clearEntries: () => void
 }
@@ -45,6 +47,21 @@ export const useOutputStore = create<OutputState>((set) => ({
     set((state) => ({
       entries: state.entries.map((e) =>
         e.sessionId === sessionId ? { ...e, ...patch } : e
+      ),
+    }))
+  },
+
+  markRunningEntriesAsUnconfirmed: () => {
+    const reason = '流已结束，但未收到工具完成结果'
+    set((state) => ({
+      entries: state.entries.map((entry) =>
+        entry.status === 'running'
+          ? {
+              ...entry,
+              status: 'failed' as const,
+              stderr: entry.stderr ? `${entry.stderr}\n${reason}` : reason,
+            }
+          : entry,
       ),
     }))
   },

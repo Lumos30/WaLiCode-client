@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react'
 import { useThemeStore } from '../stores/themeStore'
-import { useAiPatchStore } from '../stores/aiPatchStore'
+import { canSafelyRevertAiPatch, useAiPatchStore } from '../stores/aiPatchStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import type { ChangeSummary, ChangeFile } from '../api/agent'
@@ -31,30 +31,34 @@ function FileChangeRow({ file, colors, onStatusChange }: {
   // 从 aiPatchStore 获取预览数据
   const preview = useAiPatchStore(state => state.getPreviewForFile('local', file.path) || state.getPreviewForFile('remote', file.path))
   const removePreview = useAiPatchStore(state => state.removePreview)
+  const canRevert = preview ? canSafelyRevertAiPatch(preview) : false
 
   const handleRevert = useCallback(async () => {
-    if (!preview) return
+    if (!preview || !canRevert) return
     setReverting(true)
     try {
       const localStore = useLocalFileStore.getState()
       const remoteStore = useFileExplorerStore.getState()
 
+      let restored = false
       if (preview.target === 'local') {
-        await localStore.restoreFileContent(preview.path, preview.beforeContent)
+        restored = await localStore.restoreFileContent(preview.path, preview.beforeContent)
       } else if (preview.target === 'remote' && preview.connectionId) {
-        await remoteStore.restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
+        restored = await remoteStore.restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
       }
 
-      removePreview(preview.id)
-      setStatus('reverted')
-      setShowDiff(false)
-      onStatusChange?.(file.path, 'reverted')
+      if (restored) {
+        removePreview(preview.id)
+        setStatus('reverted')
+        setShowDiff(false)
+        onStatusChange?.(file.path, 'reverted')
+      }
     } catch (e) {
       console.error('[Revert] 失败:', e)
     } finally {
       setReverting(false)
     }
-  }, [preview, removePreview, file.path, onStatusChange])
+  }, [preview, canRevert, removePreview, file.path, onStatusChange])
 
   const handleAccept = useCallback(() => {
     if (!preview) return
@@ -125,10 +129,15 @@ function FileChangeRow({ file, colors, onStatusChange }: {
       {canShowDiff && showDiff && preview && (
         <div className="mt-1 mb-1 animate-in slide-in-from-top-1 duration-200">
           <InlineDiff beforeContent={preview.beforeContent} afterContent={preview.afterContent} maxHeight={250} />
+          {!canRevert && (
+            <p className="mt-1 text-[10px]" style={{ color: '#f59e0b' }}>
+              修改前内容未捕获，此 Diff 仅供查看，不能安全回退。
+            </p>
+          )}
           <div className="flex items-center justify-end gap-1.5 mt-1">
             <button
               onClick={handleRevert}
-              disabled={reverting}
+              disabled={reverting || !canRevert}
               className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium transition-colors hover:opacity-80 disabled:opacity-50"
               style={{
                 backgroundColor: 'rgba(239,68,68,0.12)',
@@ -141,7 +150,7 @@ function FileChangeRow({ file, colors, onStatusChange }: {
                   <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                 </svg>
               ) : '↩'}
-              Revert
+              {canRevert ? 'Revert' : '无法安全回退'}
             </button>
             <button
               onClick={handleAccept}
@@ -173,6 +182,7 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
   // 从 aiPatchStore 获取当前所有预览
   const previews = useAiPatchStore(s => s.previews)
   const removePreview = useAiPatchStore(s => s.removePreview)
+  const revertiblePreviews = previews.filter(canSafelyRevertAiPatch)
 
   const totalCreated = summary.created?.length || 0
   const totalModified = summary.modified?.length || 0
@@ -217,17 +227,20 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
 
       for (const file of allFiles) {
         if (fileStatuses[file.path] && fileStatuses[file.path] !== 'pending') continue
-        const preview = previews.find(p => p.path === file.path)
+        const preview = revertiblePreviews.find(p => p.path === file.path)
         if (!preview) continue
 
         try {
+          let restored = false
           if (preview.target === 'local') {
-            await localStore.restoreFileContent(preview.path, preview.beforeContent)
+            restored = await localStore.restoreFileContent(preview.path, preview.beforeContent)
           } else if (preview.target === 'remote' && preview.connectionId) {
-            await remoteStore.restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
+            restored = await remoteStore.restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
           }
-          removePreview(preview.id)
-          setFileStatuses(prev => ({ ...prev, [file.path]: 'reverted' }))
+          if (restored) {
+            removePreview(preview.id)
+            setFileStatuses(prev => ({ ...prev, [file.path]: 'reverted' }))
+          }
         } catch (e) {
           console.error(`[RevertAll] ${file.path} 失败:`, e)
         }
@@ -235,7 +248,7 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
     } finally {
       setBulkProcessing(false)
     }
-  }, [totalFiles, allFiles, previews, removePreview, fileStatuses])
+  }, [totalFiles, allFiles, revertiblePreviews, removePreview, fileStatuses])
 
   const handleFileStatusChange = useCallback((path: string, status: FileStatus) => {
     setFileStatuses(prev => ({ ...prev, [path]: status }))
@@ -329,7 +342,7 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
           <div className="flex items-center gap-2 flex-shrink-0">
             <button
               onClick={handleRevertAll}
-              disabled={bulkProcessing}
+              disabled={bulkProcessing || revertiblePreviews.length === 0}
               className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-medium transition-all hover:opacity-80 disabled:opacity-50"
               style={{
                 backgroundColor: 'rgba(239,68,68,0.10)',
@@ -347,7 +360,7 @@ export const SessionSummaryCard = React.memo(function SessionSummaryCard({ summa
                   <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
                 </svg>
               )}
-              Revert All
+              Revert All{revertiblePreviews.length < previews.length ? ` (${revertiblePreviews.length})` : ''}
             </button>
             <button
               onClick={handleAcceptAll}

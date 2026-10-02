@@ -2,8 +2,9 @@ import { useCallback, useMemo, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
 import { useFileExplorerStore, formatFileSize, isDiffTab } from '../stores/fileExplorerStore'
 import { DiffFileTab } from '../stores/fileExplorerStore'
-import { useAiPatchStore } from '../stores/aiPatchStore'
+import { canSafelyRevertAiPatch, useAiPatchStore } from '../stores/aiPatchStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
+import '../editor/configureMonaco'
 import Editor from '@monaco-editor/react'
 import { DiffEditor } from '@monaco-editor/react'
 
@@ -67,6 +68,7 @@ export function FileWorkspace() {
       : null,
     [previews, fileTab],
   )
+  const canRevertActivePreview = activePreview ? canSafelyRevertAiPatch(activePreview) : false
 
   // 简单的扩展名推断语言
   const getLanguage = (filename: string) => {
@@ -245,19 +247,26 @@ export function FileWorkspace() {
                     <div className="mt-1 truncate" style={{ color: colors.textDim }}>
                       {activePreview.path}
                     </div>
+                    {!canRevertActivePreview && (
+                      <div className="mt-1" style={{ color: colors.yellow }}>
+                        修改前内容未捕获，此变更不能安全还原。
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={async () => {
+                        if (!canRevertActivePreview) return
                         const success = await restoreFileContent(activePreview.connectionId!, activePreview.path, activePreview.beforeContent)
                         if (success) {
                           removePreview(activePreview.id)
                         }
                       }}
+                      disabled={!canRevertActivePreview}
                       className="px-2 py-1 rounded text-[11px]"
                       style={{ backgroundColor: `${colors.red}15`, color: colors.red }}
                     >
-                      还原
+                      {canRevertActivePreview ? '还原' : '无法安全还原'}
                     </button>
                     <button
                       onClick={() => removePreview(activePreview.id)}

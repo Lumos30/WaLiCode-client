@@ -1,4 +1,7 @@
 import { defineConfig } from 'vite'
+import type { Plugin } from 'vite'
+import { rmSync } from 'node:fs'
+import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import monacoEditorPlugin from 'vite-plugin-monaco-editor'
@@ -6,15 +9,36 @@ import monacoEditorPlugin from 'vite-plugin-monaco-editor'
 // 由于 Vite plugin 的导出形式可能是 esm default，尝试兼容取 .default 或它本身
 const monacoPlugin = (monacoEditorPlugin as any).default || monacoEditorPlugin
 
+/**
+ * vite-plugin-monaco-editor writes workers after Vite has emptied dist. When a
+ * worker is removed from its configuration, the plugin deliberately leaves the
+ * old generated file behind. Remove only that generated directory before each
+ * production build so the deployed asset set matches languageWorkers exactly.
+ */
+function cleanGeneratedMonacoWorkers(): Plugin {
+  return {
+    name: 'clean-generated-monaco-workers',
+    apply: 'build',
+    buildStart() {
+      rmSync(resolve(__dirname, 'dist', 'monacoeditorwork'), {
+        recursive: true,
+        force: true,
+      })
+    },
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
+    cleanGeneratedMonacoWorkers(),
     monacoPlugin({
-      // 根据你的需要，可以只引入基础语言，减少包体积
-      // 例如 ['json', 'javascript', 'typescript', 'html', 'css']
-      languageWorkers: ['editorWorkerService', 'css', 'html', 'json', 'typescript']
+      // File workspaces are already lazy. Keep their first open bounded too:
+      // editing/diff/highlighting use the editor worker, JSON keeps validation;
+      // heavyweight TypeScript/CSS/HTML language services are not preloaded.
+      languageWorkers: ['editorWorkerService', 'json']
     }),
   ],
   base: './',
@@ -30,9 +54,8 @@ export default defineConfig({
             if (id.includes('/react-dom/') || id.match(/\/react\/(index|cjs)/) || id.includes('/react/')) {
               return 'react-vendor'
             }
-            // Monaco 编辑器 — 核心与 React 绑定拆分
-            if (id.includes('/monaco-editor/')) return 'monaco-core'
-            if (id.includes('/@monaco-editor/')) return 'monaco-react'
+            // Monaco belongs to lazy file workspaces. Let Vite derive its shared
+            // dynamic chunk instead of forcing it into an entry dependency.
             // 终端
             if (id.includes('/@xterm/')) return 'xterm-vendor'
             // Markdown 渲染 — 按子包拆分

@@ -3,13 +3,15 @@ import Editor from '@monaco-editor/react'
 import { DiffEditor } from '@monaco-editor/react'
 import { useThemeStore } from '../stores/themeStore'
 import { useLocalFileStore, isLocalDiffTab, type LocalDiffTab, type LocalOpenTab } from '../stores/localFileStore'
-import { useAiPatchStore } from '../stores/aiPatchStore'
+import { canSafelyRevertAiPatch, useAiPatchStore } from '../stores/aiPatchStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
+import '../editor/configureMonaco'
 
 /** Diff 视图组件：左右对比 before / after（本地文件） */
 function LocalDiffEditorView({ activeTab, onAccept, onRestore }: { activeTab: LocalDiffTab; onAccept: () => void; onRestore: () => void }) {
   const { colors, currentTheme } = useThemeStore()
   const preview = useAiPatchStore((state) => state.previews.find((p) => p.id === activeTab.previewId))
+  const canRestore = preview ? canSafelyRevertAiPatch(preview) : false
   const openSourceFile = useLocalFileStore((s) => s.openFile)
 
   // 点击文件名打开源文件（切换到普通编辑标签页）
@@ -45,10 +47,11 @@ function LocalDiffEditorView({ activeTab, onAccept, onRestore }: { activeTab: Lo
             <div className="flex items-center gap-2">
               <button
                 onClick={onRestore}
+                disabled={!canRestore}
                 className="px-2 py-1 rounded text-[11px]"
                 style={{ backgroundColor: `${colors.red}15`, color: colors.red }}
               >
-                还原
+                {canRestore ? '还原' : '无法安全还原'}
               </button>
               <button
                 onClick={onAccept}
@@ -61,6 +64,11 @@ function LocalDiffEditorView({ activeTab, onAccept, onRestore }: { activeTab: Lo
           )}
         </div>
       </div>
+      {preview && !canRestore && (
+        <div className="px-3 py-1 text-[10px]" style={{ backgroundColor: `${colors.yellow}10`, color: colors.yellow }}>
+          修改前内容未捕获，此 Diff 仅供查看，不能安全还原。
+        </div>
+      )}
       <div className="flex-1 min-h-0">
         <DiffEditor
           height="100%"
@@ -109,7 +117,7 @@ export function LocalFileWorkspace() {
   const handleRestoreDiff = useCallback(async () => {
     if (!diffTab) return
     const preview = useAiPatchStore.getState().previews.find((p) => p.id === diffTab.previewId)
-    if (!preview) return
+    if (!preview || !canSafelyRevertAiPatch(preview)) return
     const success = await restoreFileContent(preview.path, preview.beforeContent)
     if (success) {
       removePreview(diffTab.previewId)

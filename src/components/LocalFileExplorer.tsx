@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useThemeStore } from '../stores/themeStore'
-import { useLocalFileStore, type LocalFileNode, type LocalOpenTab, isLocalDiffTab } from '../stores/localFileStore'
+import { useLocalFileStore, type LocalFileNode, type LocalOpenTab, isLocalDiffTab, isSameLocalWorkspacePath } from '../stores/localFileStore'
 import { useSshAgentStore } from '../stores/sshAgentStore'
+import { useAgentStore } from '../stores/agentStore'
+
+const LOCAL_FILE_DRAG_MIME = 'application/x-walicode-local-file'
 
 export function LocalFileExplorer() {
   const { colors } = useThemeStore()
@@ -13,14 +16,24 @@ export function LocalFileExplorer() {
     loading,
     error,
     openFolder,
+    restoreBoundFolder,
     toggleDirectory,
     openFile,
     setSelectedPath,
     closeFolder,
     activeTabKey,
   } = useLocalFileStore()
+  const boundLocalRootPath = useAgentStore((state) => {
+    const session = state.currentSessionId ? state.sessions.get(state.currentSessionId) : null
+    return session?.executionTargetType === 'LOCAL' ? session.executionTargetRef : null
+  })
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: LocalFileNode | null } | null>(null)
+  const [restoringBoundFolder, setRestoringBoundFolder] = useState(false)
+  const needsBoundWorkspaceRestore = Boolean(
+    boundLocalRootPath && !isSameLocalWorkspacePath(rootPath, boundLocalRootPath),
+  )
+  const boundFolderName = boundLocalRootPath?.replace(/\\/g, '/').split('/').filter(Boolean).pop() || '已绑定项目'
 
   useEffect(() => {
     if (contextMenu) {
@@ -76,6 +89,14 @@ export function LocalFileExplorer() {
               color: isActive || isSelected ? colors.accent : colors.textSecondary,
               backgroundColor: isActive || isSelected ? `${colors.accent}15` : 'transparent',
             }}
+            draggable={!node.directory}
+            onDragStart={(event) => {
+              if (node.directory) return
+              event.dataTransfer.effectAllowed = 'copy'
+              event.dataTransfer.setData(LOCAL_FILE_DRAG_MIME, JSON.stringify({ path: node.path, name: node.name }))
+              // 仅提供文件名给系统拖放目标；完整路径仅由本应用的受检 MIME 使用。
+              event.dataTransfer.setData('text/plain', node.name)
+            }}
             onMouseEnter={(e) => {
               if (!isActive && !isSelected) e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.05)'
             }}
@@ -87,7 +108,7 @@ export function LocalFileExplorer() {
               e.stopPropagation()
               setContextMenu({ x: e.clientX, y: e.clientY, node })
             }}
-            title={node.path}
+            title={node.directory ? node.path : `${node.path}\n拖到对话输入框可添加为上下文`}
           >
             <div
               className="flex items-center gap-1.5 flex-1 min-w-0"
@@ -160,6 +181,36 @@ export function LocalFileExplorer() {
         </div>
       )
     })
+  }
+
+  if (needsBoundWorkspaceRestore && boundLocalRootPath) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center gap-3 px-4 py-8 text-center">
+        <svg className="w-12 h-12 opacity-30" viewBox="0 0 24 24" fill="none" stroke={colors.textDim} strokeWidth="1.5">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+        <p className="text-sm" style={{ color: colors.textSecondary }}>恢复会话绑定的本地项目</p>
+        <p className="text-xs leading-relaxed" style={{ color: colors.textDim }}>
+          当前历史会话绑定到“{boundFolderName}”。为保护本地文件权限，请在系统选择器中重新选择该文件夹。
+        </p>
+        {error && <p className="text-xs" style={{ color: colors.red }}>{error}</p>}
+        <button
+          disabled={restoringBoundFolder}
+          onClick={async () => {
+            setRestoringBoundFolder(true)
+            try {
+              await restoreBoundFolder(boundLocalRootPath)
+            } finally {
+              setRestoringBoundFolder(false)
+            }
+          }}
+          className="mt-2 px-4 py-2 rounded-lg text-xs font-medium transition-colors disabled:opacity-60"
+          style={{ backgroundColor: colors.accent, color: '#fff' }}
+        >
+          {restoringBoundFolder ? '正在恢复…' : '选择并恢复项目'}
+        </button>
+      </div>
+    )
   }
 
   if (!rootPath) {

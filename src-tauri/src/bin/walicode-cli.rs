@@ -9,10 +9,14 @@ use clap::Parser;
 // 使用前缀 _cli_ 避免与 lib.rs 中的模块名冲突
 #[path = "../cli/app.rs"]
 mod _cli_app;
+// CLI 与 GUI 共用同一进程生命周期和输出编码实现。
 #[path = "../cli/sse_client.rs"]
 mod _cli_sse;
 #[path = "../cli/tui.rs"]
 mod _cli_tui;
+#[allow(dead_code)]
+#[path = "../shell_exec.rs"]
+mod shell_exec;
 
 use _cli_app::CliArgs;
 use _cli_tui::run_cli;

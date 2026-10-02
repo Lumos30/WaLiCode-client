@@ -302,6 +302,116 @@ function protectElements(text: string, store: string[]): string {
   return r
 }
 
+/**
+ * 模型偶尔把一整段源码包成行内反引号。长度较短的行内代码保持原样；
+ * 只有长度足够且包含明确源码结构的内容才升级为围栏代码块，避免误伤普通术语。
+ */
+function promoteLongInlineSourceCodeJS(text: string): string {
+  const inferLanguage = (source: string): string => {
+    if (/\b(public\s+)?class\s+\w+|\bstatic\s+void\s+main\s*\(/.test(source)) return 'java'
+    if (/\b(def|import)\s+\w+|\bprint\s*\(/.test(source)) return 'python'
+    if (/\b(const|let|function)\s+\w+|=>/.test(source)) return 'javascript'
+    return 'text'
+  }
+  const looksLikeSource = (source: string): boolean => {
+    const normalized = source.replace(/\u00a0/g, ' ').trim()
+    return normalized.length >= 80
+      && /[{};]/.test(normalized)
+      && /\b(class|public|private|protected|static|function|const|let|def|return|import)\b/.test(normalized)
+  }
+
+  return text.replace(/`([^`\n]+)`/g, (full, source: string) => {
+    if (!looksLikeSource(source)) return full
+    const normalized = source.replace(/\u00a0/g, ' ').trim()
+    return `\n\n\`\`\`${inferLanguage(normalized)}\n${normalized}\n\`\`\`\n\n`
+  })
+}
+
+/**
+ * 仅为显示整理紧凑的单行 Java 源码；复制按钮仍复制该等价格式化文本。
+ * 字符串和注释不会被拆分，避免展示层把字面量改坏。
+ */
+function formatCompactJavaForDisplay(source: string): string {
+  if (source.includes('\n') || source.length < 40) return source
+
+  const lines: string[] = []
+  let current = ''
+  let indent = 0
+  let quote: '"' | "'" | null = null
+  let escaped = false
+  let lineComment = false
+  let blockComment = false
+  const flush = () => {
+    const value = current.trim()
+    if (value) lines.push(`${'  '.repeat(Math.max(indent, 0))}${value}`)
+    current = ''
+  }
+
+  for (let index = 0; index < source.length; index++) {
+    const char = source[index]
+    const next = source[index + 1] || ''
+
+    if (lineComment) {
+      current += char
+      continue
+    }
+    if (blockComment) {
+      current += char
+      if (char === '*' && next === '/') {
+        current += next
+        index++
+        blockComment = false
+      }
+      continue
+    }
+    if (quote) {
+      current += char
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '/' && next === '/') {
+      current += '//'
+      index++
+      lineComment = true
+      continue
+    }
+    if (char === '/' && next === '*') {
+      current += '/*'
+      index++
+      blockComment = true
+      continue
+    }
+    if (char === '"' || char === "'") {
+      current += char
+      quote = char
+      continue
+    }
+    if (char === '{') {
+      current += char
+      flush()
+      indent++
+      continue
+    }
+    if (char === '}') {
+      flush()
+      indent = Math.max(0, indent - 1)
+      current = '}'
+      if (next !== ';' && next !== ',' && next !== ')') flush()
+      continue
+    }
+    if (char === ';') {
+      current += char
+      flush()
+      continue
+    }
+    current += char
+  }
+  flush()
+  return lines.length > 1 ? lines.join('\n') : source
+}
+
 function replaceAndStoreJS(text: string, pattern: RegExp, store: string[], prefix: string): string {
   return text.replace(pattern, (m) => {
     const placeholder = prefix + store.length + CB_SUFFIX
@@ -821,6 +931,9 @@ function ensureBlankLinesJS(text: string): string {
 function normalizeMarkdown(text: string): string {
   if (!text) return text
 
+  // 先修复被误标为行内代码的长源码，再进入常规 Markdown 占位符流程。
+  text = promoteLongInlineSourceCodeJS(text)
+
   // ═══ 阶段 0：保护代码块和行内元素 ═══
   const store: string[] = []
   let r = protectElements(text, store)
@@ -934,7 +1047,8 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
   const { colors } = useThemeStore()
   const [copied, setCopied] = React.useState(false)
   const lang = className?.replace('language-', '') || 'text'
-  const text = String(children || '').replace(/\n$/, '')
+  const rawText = String(children || '').replace(/\n$/, '')
+  const text = lang === 'java' ? formatCompactJavaForDisplay(rawText) : rawText
 
   const handleCopy = () => {
     navigator.clipboard.writeText(text)

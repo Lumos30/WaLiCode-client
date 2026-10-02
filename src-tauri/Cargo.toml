@@ -27,6 +27,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 # 本地 PTY 终端
@@ -37,13 +39,10 @@ encoding_rs = "0.8"
 encoding_rs_io = "0.1"
 which = "6.0"
 libc = "0.2"
-# 本地 HTTP Server（供 Spring Boot 调用）
-axum = "0.7"
-async-stream = "0.3"
 futures = "0.3"
 log = "0.4"
 # CLI 终端模式
-ratatui = "0.29"
+ratatui = "0.30.2"
 crossterm = "0.28"
 reqwest = { version = "0.12", features = ["stream", "json"] }
 clap = { version = "4", features = ["derive"] }
@@ -52,3 +51,5 @@ unicode-width = "0.2"
 syntect = "5"
 dirs = "5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }

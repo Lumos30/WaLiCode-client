@@ -22,6 +22,7 @@ export type AgentMessageType =
   | 'tool_result'  // 工具执行结果
   | 'thinking'     // 思考/进度提示
   | 'summary'      // 最终汇总（含 changeSummary）
+  | 'notice'       // 用户操作导致的中性状态提示（例如主动停止）
   | 'error'        // 错误消息
 
 // Agent 会话消息
@@ -36,6 +37,8 @@ export interface AgentMessage {
   messageType: AgentMessageType
   /** 同一次对话回合的分组 ID（用户消息 + AI 多条回复共享同一 groupId） */
   groupId: string
+  /** 用户消息可再次编辑的纯文本；不包含渲染用附件预览 */
+  editableContent?: string
 
   // ── 工具相关（messageType=tool_call/tool_result 时有值） ──
   /** 工具名称 */

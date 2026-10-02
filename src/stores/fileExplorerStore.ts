@@ -123,6 +123,8 @@ interface FileExplorerStore {
   closeTabsToRight: (key: string) => void
   closeOtherTabs: (key: string) => void
   closeAllTabs: () => void
+  /** 清空当前会话遗留的远程文件浏览与编辑上下文，不断开 SSH 连接。 */
+  clearBrowserContext: () => void
 }
 
 function listIncludes(list: string[] | undefined, target: string): boolean {
@@ -157,6 +159,21 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
 
   openTabs: [],
   activeTabKey: null,
+
+  clearBrowserContext: () => set({
+    activeConnectionId: null,
+    rootPathByConnection: {},
+    homePathByConnection: {},
+    currentPathByConnection: {},
+    selectedPathByConnection: {},
+    childrenByConnection: {},
+    expandedByConnection: {},
+    loadingPathsByConnection: {},
+    loadingRootByConnection: {},
+    errorByConnection: {},
+    openTabs: [],
+    activeTabKey: null,
+  }),
 
   switchConnection: async (connectionId) => {
     set((state) => ({ activeConnectionId: connectionId, errorByConnection: { ...state.errorByConnection, [connectionId]: null } }))
@@ -366,7 +383,7 @@ export const useFileExplorerStore = create<FileExplorerStore>((set, get) => ({
       if (res.code !== '0000' || !res.data) return null
       return res.data.content || ''
     } catch (err: any) {
-      console.error('[fileExplorerStore] readRemoteFileContent error:', connectionId, path, err)
+      console.error('[fileExplorerStore] readRemoteFileContent error:', err instanceof Error ? err.name : 'unknown')
       return null
     }
   },

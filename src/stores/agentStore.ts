@@ -1,14 +1,33 @@
 import { create } from 'zustand'
 import type { AgentMessage } from '../types'
 import * as agentApi from '../api/agent'
-import type { AiAgentConfigDTO, ReActStep, ChangeSummary } from '../api/agent'
+import type { AiAgentConfigDTO, ReActStep, ChangeSummary, ExecutionTargetType } from '../api/agent'
 import { toolProgressStore } from '../components/ToolProgressBar'
+import { useFileExplorerStore } from './fileExplorerStore'
+import { useLocalFileStore } from './localFileStore'
+
+interface AgentSessionState {
+  id: string
+  name: string
+  agentId: string
+  messages: AgentMessage[]
+  createdAt: number
+  updatedAt: number
+  messageCount: number
+  executionTargetType: ExecutionTargetType | null
+  executionTargetRef: string | null
+  messagesLoaded: boolean
+  messagesLoading: boolean
+  resumeLoaded: boolean
+  resumeLoading: boolean
+  loadError: string | null
+}
 
 interface AgentStore {
   // 当前会话 ID（值 = 服务端返回的 sessionId）
   currentSessionId: string | null
   // 会话历史
-  sessions: Map<string, { id: string; name: string; agentId: string; messages: AgentMessage[]; createdAt: number }>
+  sessions: Map<string, AgentSessionState>
   // 输入框内容
   inputText: string
   // 是否等待响应
@@ -25,7 +44,21 @@ interface AgentStore {
 
   // ===== 会话管理 =====
   // 创建服务端会话并关联到当前会话
-  createServerSession: (agentId: string) => Promise<string>
+  createServerSession: (
+    agentId: string,
+    executionTarget?: { type: ExecutionTargetType; reference: string } | null,
+  ) => Promise<string>
+  // 从服务端加载当前用户的历史会话摘要
+  loadHistorySessions: () => Promise<void>
+  // 选择会话并按需加载消息、恢复 ADK 上下文
+  selectSession: (sessionId: string) => Promise<void>
+  deleteSession: (sessionId: string) => Promise<void>
+  setExecutionTarget: (
+    sessionId: string,
+    executionTarget: { type: ExecutionTargetType; reference: string } | null,
+  ) => Promise<void>
+  historyLoading: boolean
+  historyError: string | null
   // 设置当前会话
   setCurrentSession: (id: string | null) => void
   // 添加消息
@@ -57,11 +90,13 @@ interface AgentStore {
   removeThinkingMessages: (sessionId: string, groupId: string) => void
   // 添加错误消息
   addErrorMessage: (sessionId: string, groupId: string, content: string) => void
-  // 停止时将同组所有 in_progress 工具消息标记为 failure
-  markGroupInProgressAsFailure: (sessionId: string, groupId: string) => void
+  // 添加不属于模型回复、也不属于错误的会话状态提示
+  addNoticeMessage: (sessionId: string, groupId: string, content: string) => void
+  // 将同组所有 in_progress 工具消息标记为 failure，并保留实际原因
+  markGroupInProgressAsFailure: (sessionId: string, groupId: string, reason?: string) => void
 
-  // 编辑重发：删除从 messageId 开始的所有消息，将内容填入输入框
-  editAndRetry: (sessionId: string, messageId: string) => void
+  // 后端修订成功后，将当前会话无感切换到新 ID，并截断目标消息及后续内容
+  applySessionRevision: (sourceSessionId: string, revisedSessionId: string, messageId: string) => void
   // 设置输入框内容
   setInputText: (text: string) => void
   // 设置加载状态
@@ -71,11 +106,68 @@ interface AgentStore {
   newConversation: (agentId: string) => Promise<void>
 }
 
+function mapPersistedMessages(messages: agentApi.ChatHistoryMessageDTO[]): AgentMessage[] {
+  const mapped: AgentMessage[] = []
+  let currentGroupId = ''
+  let legacyUserIndex = 0
+
+  for (const message of messages) {
+    const content = message.content ?? ''
+    if (message.role === 'user') {
+      legacyUserIndex += 1
+      currentGroupId = message.turnId ? `turn_${message.turnId}` : `legacy_turn_${legacyUserIndex}`
+      mapped.push({
+        id: `db_${message.id}`,
+        role: 'user',
+        content,
+        editableContent: content,
+        timestamp: message.createdAt ?? Date.now(),
+        messageType: 'text',
+        groupId: currentGroupId,
+      })
+      continue
+    }
+
+    if (!currentGroupId) {
+      currentGroupId = message.turnId ? `turn_${message.turnId}` : `legacy_turn_orphan_${message.id}`
+    }
+
+    if (message.role === 'tool') {
+      mapped.push({
+        id: `db_${message.id}`,
+        role: 'assistant',
+        content: content || (message.toolName ? `调用 ${message.toolName}` : '工具执行结果'),
+        timestamp: message.createdAt ?? Date.now(),
+        messageType: 'tool_call',
+        groupId: currentGroupId,
+        toolName: message.toolName ?? undefined,
+        toolCallId: message.toolCallId ?? undefined,
+        toolResult: content,
+        status: 'success',
+      })
+      continue
+    }
+
+    mapped.push({
+      id: `db_${message.id}`,
+      role: message.role === 'system' ? 'system' : 'assistant',
+      content,
+      timestamp: message.createdAt ?? Date.now(),
+      messageType: 'text',
+      groupId: currentGroupId,
+    })
+  }
+
+  return mapped
+}
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
   currentSessionId: null,
   sessions: new Map(),
   inputText: '',
   isLoading: false,
+  historyLoading: false,
+  historyError: null,
   showHistoryPanel: false,
   toggleHistoryPanel: () => set((s) => ({ showHistoryPanel: !s.showHistoryPanel })),
 
@@ -93,8 +185,182 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   setCurrentAgentId: (id) => set({ currentAgentId: id }),
 
-  createServerSession: async (agentId) => {
-    const serverSessionId = await agentApi.createSession(agentId)
+  loadHistorySessions: async () => {
+    const stateBefore = get()
+    if (stateBefore.historyLoading) return
+    set({ historyLoading: true, historyError: null })
+    try {
+      const summaries = await agentApi.listSessions()
+      const currentId = get().currentSessionId
+      set((state) => {
+        const sessions = new Map(state.sessions)
+        for (const summary of summaries) {
+          const existing = sessions.get(summary.sessionId)
+          sessions.set(summary.sessionId, {
+            id: summary.sessionId,
+            name: summary.title?.trim() || existing?.name || '历史会话',
+            agentId: summary.agentId,
+            messages: existing?.messages ?? [],
+            createdAt: summary.createdAt ?? existing?.createdAt ?? Date.now(),
+            updatedAt: summary.updatedAt ?? existing?.updatedAt ?? Date.now(),
+            messageCount: summary.messageCount ?? existing?.messageCount ?? 0,
+            executionTargetType: summary.executionTargetType ?? null,
+            executionTargetRef: summary.executionTargetRef ?? null,
+            messagesLoaded: existing?.messagesLoaded ?? false,
+            messagesLoading: false,
+            resumeLoaded: existing?.resumeLoaded ?? false,
+            resumeLoading: false,
+            loadError: existing?.loadError ?? null,
+          })
+        }
+        return { sessions, historyLoading: false }
+      })
+
+      // 首次启动自动展示最近一条；之后的会话在历史面板点击时懒加载。
+      const selectedId = currentId || summaries[0]?.sessionId
+      if (selectedId && !get().currentSessionId) {
+        await get().selectSession(selectedId)
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      set({ historyLoading: false, historyError: message })
+    }
+  },
+
+  selectSession: async (sessionId) => {
+    const session = get().sessions.get(sessionId)
+    if (!session) return
+    set({ currentSessionId: sessionId, historyError: null })
+    if ((session.messagesLoaded && session.resumeLoaded) || session.messagesLoading || session.resumeLoading) return
+
+    const needsMessages = !session.messagesLoaded
+    const needsResume = !session.resumeLoaded
+
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const current = sessions.get(sessionId)
+      if (current) sessions.set(sessionId, {
+        ...current,
+        messagesLoading: needsMessages,
+        resumeLoading: needsResume,
+        loadError: null,
+      })
+      return { sessions }
+    })
+    try {
+      if (needsMessages) {
+        const messages = await agentApi.getSessionMessages(sessionId)
+        set((state) => {
+          const sessions = new Map(state.sessions)
+          const current = sessions.get(sessionId)
+          if (current) {
+            sessions.set(sessionId, {
+              ...current,
+              messages: mapPersistedMessages(messages),
+              messageCount: messages.length,
+              messagesLoaded: true,
+              messagesLoading: false,
+            })
+          }
+          return { sessions }
+        })
+      }
+
+      if (needsResume) {
+        try {
+          await agentApi.resumeSession(sessionId)
+          set((state) => {
+            const sessions = new Map(state.sessions)
+            const current = sessions.get(sessionId)
+            if (current) sessions.set(sessionId, {
+              ...current,
+              resumeLoaded: true,
+              resumeLoading: false,
+              loadError: null,
+            })
+            return { sessions, historyError: null }
+          })
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          const message = get().sessions.get(sessionId)?.messagesLoaded
+            ? `历史消息已加载，但会话恢复失败：${reason}`
+            : `会话恢复失败：${reason}`
+          set((state) => {
+            const sessions = new Map(state.sessions)
+            const current = sessions.get(sessionId)
+            if (current) sessions.set(sessionId, { ...current, resumeLoading: false, loadError: message })
+            return { sessions, historyError: message }
+          })
+        }
+      } else {
+        set((state) => {
+          const sessions = new Map(state.sessions)
+          const current = sessions.get(sessionId)
+          if (current) sessions.set(sessionId, { ...current, loadError: null })
+          return { sessions }
+        })
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      set((state) => {
+        const sessions = new Map(state.sessions)
+        const current = sessions.get(sessionId)
+        if (current) sessions.set(sessionId, { ...current, messagesLoading: false, resumeLoading: false, loadError: `历史消息加载失败：${message}` })
+        return { sessions, historyError: `历史消息加载失败：${message}` }
+      })
+    }
+  },
+
+  deleteSession: async (sessionId) => {
+    if (get().isLoading && get().currentSessionId === sessionId) {
+      const error = new Error('Agent 仍在运行，请先停止后再删除')
+      set({ historyError: error.message })
+      throw error
+    }
+    try {
+      await agentApi.deleteSession(sessionId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      set({ historyError: message })
+      throw error
+    }
+    const wasCurrent = get().currentSessionId === sessionId
+    const nextSessions = Array.from(get().sessions.values())
+      .filter(session => session.id !== sessionId && (session.messageCount > 0 || session.messages.length > 0))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      sessions.delete(sessionId)
+      return {
+        sessions,
+        currentSessionId: wasCurrent ? (nextSessions[0]?.id ?? null) : state.currentSessionId,
+        historyError: null,
+      }
+    })
+    if (wasCurrent && nextSessions[0]) {
+      await get().selectSession(nextSessions[0].id)
+    }
+  },
+
+  setExecutionTarget: async (sessionId, executionTarget) => {
+    const saved = await agentApi.updateExecutionTarget(sessionId, executionTarget)
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        sessions.set(sessionId, {
+          ...session,
+          executionTargetType: saved.type,
+          executionTargetRef: saved.reference,
+          updatedAt: Date.now(),
+        })
+      }
+      return { sessions, historyError: null }
+    })
+  },
+
+  createServerSession: async (agentId, executionTarget = null) => {
+    const serverSessionId = await agentApi.createSession(agentId, 'default', executionTarget)
     if (!serverSessionId) throw new Error('创建会话失败')
     // 新建会话时清除工具进度条残留状态
     toolProgressStore.clear()
@@ -105,6 +371,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       name: `会话 ${state.sessions.size + 1}`,
       messages: [] as AgentMessage[],
       createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messageCount: 0,
+      executionTargetType: executionTarget?.type ?? null,
+      executionTargetRef: executionTarget?.reference ?? null,
+      messagesLoaded: true,
+      messagesLoading: false,
+      resumeLoaded: true,
+      resumeLoading: false,
+      loadError: null,
     }
     set((s) => {
       const sessions = new Map(s.sessions)
@@ -386,14 +661,33 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     })
   },
 
-  markGroupInProgressAsFailure: (sessionId, groupId) =>
+  addNoticeMessage: (sessionId, groupId, content) => {
+    const msg: AgentMessage = {
+      id: `notice_${Date.now()}`,
+      role: 'system',
+      content,
+      timestamp: Date.now(),
+      messageType: 'notice',
+      groupId,
+    }
+    set((state) => {
+      const sessions = new Map(state.sessions)
+      const session = sessions.get(sessionId)
+      if (session) {
+        sessions.set(sessionId, { ...session, messages: [...session.messages, msg] })
+      }
+      return { sessions }
+    })
+  },
+
+  markGroupInProgressAsFailure: (sessionId, groupId, reason = '用户取消') =>
     set((state) => {
       const sessions = new Map(state.sessions)
       const session = sessions.get(sessionId)
       if (session) {
         const messages = session.messages.map((m) =>
           m.groupId === groupId && m.messageType === 'tool_call' && m.status === 'in_progress'
-            ? { ...m, status: 'failure' as const, content: '用户取消' }
+            ? { ...m, status: 'failure' as const, content: reason }
             : m
         )
         sessions.set(sessionId, { ...session, messages })
@@ -401,18 +695,29 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return { sessions }
     }),
 
-  editAndRetry: (sessionId, messageId) =>
+  applySessionRevision: (sourceSessionId, revisedSessionId, messageId) =>
     set((state) => {
-      const sessions = new Map(state.sessions)
-      const session = sessions.get(sessionId)
+      const session = state.sessions.get(sourceSessionId)
       if (!session) return {}
       const msgIndex = session.messages.findIndex(m => m.id === messageId)
       if (msgIndex < 0) return {}
-      const targetMsg = session.messages[msgIndex]
-      // 截断消息列表（保留 msgIndex 之前的消息）
-      const truncatedMessages = session.messages.slice(0, msgIndex)
-      sessions.set(sessionId, { ...session, messages: truncatedMessages })
-      return { sessions, inputText: targetMsg.content }
+      const revisedSession = {
+        ...session,
+        id: revisedSessionId,
+        messages: session.messages.slice(0, msgIndex),
+      }
+      const sessions = new Map<string, typeof revisedSession>()
+      state.sessions.forEach((value, key) => {
+        if (key === sourceSessionId) sessions.set(revisedSessionId, revisedSession)
+        else sessions.set(key, value)
+      })
+      toolProgressStore.clear()
+      return {
+        sessions,
+        currentSessionId: state.currentSessionId === sourceSessionId
+          ? revisedSessionId
+          : state.currentSessionId,
+      }
     }),
 
   setLoading: (loading) => set({ isLoading: loading }),
@@ -430,6 +735,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   newConversation: async (agentId) => {
-    await get().createServerSession(agentId)
+    // A fresh chat must not silently retain the old project's authority or a
+    // remote file browser from the previous conversation. Create first so a
+    // failed server request leaves the user's current workspace untouched.
+    await get().createServerSession(agentId, null)
+    useFileExplorerStore.getState().clearBrowserContext()
+    useLocalFileStore.getState().closeFolder()
   },
 }))

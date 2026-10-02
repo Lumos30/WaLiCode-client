@@ -16,17 +16,33 @@ import type { AgentMessage } from '../types'
 import { MessageBubble } from './MessageBubble'
 import { PermissionConfirmModal } from './PermissionConfirmModal'
 import { StreamStatusBar } from './StreamStatusBar'
+import { HarnessRunStatusBar } from './HarnessRunStatusBar'
+import { useHarnessStore } from '../stores/harnessStore'
 import { ErrorRecoveryCard, type ErrorRecovery } from './ErrorRecoveryCard'
 import { TopicDivider, shouldInsertTopicDivider } from './TopicDivider'
 import { SessionSummaryCard } from './SessionSummaryCard'
 import { ArtifactSummaryPanel } from './ArtifactSummaryPanel'
 import { CommandMenu, useCommandMenu, type MenuItem } from './CommandMenu'
 import { ToolProgressBar, toolProgressStore } from './ToolProgressBar'
-import { ShortcutHelp } from './ShortcutHelp'
 import { MarkdownContent, ThinkingBlock, splitThinkTags, classifyTool, getToolIconInfo, STEP_COLORS } from './MessageBubbleShared'
 import { TypewriterRenderer } from './TypewriterRenderer'
 import { ChatExport } from './ChatExport'
 import { EmptyState } from './EmptyState'
+import { MemoryPanel } from './MemoryPanel'
+
+// 只有用户明确表达服务器/远程操作意图时，才自动附加当前 SSH 连接上下文。
+// 普通问候语不应因为当前存在 SSH 连接而被模型误判成服务器运维请求。
+const SERVER_OPERATION_PATTERN = /(服务器|主机|远程|ssh|docker|容器|进程|端口|日志|磁盘|内存|cpu|系统|部署|nginx|mysql|redis|systemctl|命令|安装|启动|停止|重启|检查|查看|状态|占用|运行|连接|文件|目录)/i
+const LOCAL_FILE_DRAG_MIME = 'application/x-walicode-local-file'
+
+/** 将拖放路径约束为当前会话根目录内的相对路径，拒绝根外路径与根目录自身。 */
+function getAuthorizedLocalRelativePath(rootPath: string, candidatePath: string): string | null {
+  const normalize = (value: string) => value.replace(/[\\/]+/g, '\\').replace(/\\+$/, '').toLocaleLowerCase()
+  const root = normalize(rootPath)
+  const candidate = normalize(candidatePath)
+  if (!root || !candidate || candidate === root || !candidate.startsWith(`${root}\\`)) return null
+  return candidatePath.replace(/[\\/]+/g, '/').slice(rootPath.replace(/[\\/]+$/, '').replace(/[\\/]+/g, '/').length + 1)
+}
 
 // ===== SidebarToolCategory — RightSidebar 中按分类聚合的工具卡片 =====
 function SidebarToolCategory({ category, colors }: {
@@ -120,6 +136,7 @@ function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
   const thinkingMsgs = msgs.filter(m => m.messageType === 'thinking')
   const toolCallMsgs = msgs.filter(m => m.messageType === 'tool_call')
   const textMsgs = msgs.filter(m => m.messageType === 'text')
+  const noticeMsgs = msgs.filter(m => m.messageType === 'notice')
   const errorMsgs = msgs.filter(m => m.messageType === 'error')
   const summaryMsgs = msgs.filter(m => m.messageType === 'summary')
 
@@ -337,6 +354,19 @@ function AiTurnBlock({ msgs, colors, isLoading, streamStatus, onRetry }: {
             </div>
           )}
 
+          {/* 用户主动停止等本地会话状态；不是模型回复，也不是错误。 */}
+          {noticeMsgs.length > 0 && (
+            <div className="space-y-1">
+              {noticeMsgs.map(m => (
+                <div key={m.id} className="flex items-center gap-1.5 px-3 py-2 text-[12px] leading-relaxed rounded-lg"
+                     style={{ backgroundColor: `${colors.textDim}10`, color: colors.textSecondary, border: `1px solid ${colors.textDim}20` }}>
+                  <span aria-hidden="true">■</span>
+                  {m.content}
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* AI 文本回复 - 无重复头像,直接嵌入 */}
           {textMsgs.length > 0 && (
             <div className="text-[13px] leading-relaxed overflow-hidden min-w-0">
@@ -503,7 +533,7 @@ function stripMarkdownForPaste(text: string): string {
     .replace(/^```\w*$/gm, '')
 }
 
-export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSidebarProps) {
+export function RightSidebar({ width = 400 }: RightSidebarProps) {
   const { colors } = useThemeStore()
   const {
     sessions,
@@ -519,8 +549,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     replaceLastThinkingMessage,
     removeThinkingMessages,
     addErrorMessage,
+    addNoticeMessage,
     markGroupInProgressAsFailure,
-    editAndRetry,
+    applySessionRevision,
     clearMessages,
     isLoading,
     setLoading,
@@ -528,33 +559,43 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     agents,
     currentAgentId,
     fetchAgents,
+    loadHistorySessions,
+    setExecutionTarget,
     // setCurrentAgentId 不再使用（统一 Agent 后无需切换）
     createServerSession,
   } = useAgentStore()
 
-  const { connections, currentConnectionId } = useConnectionStore()
+  const { connections } = useConnectionStore()
+  const localRootPath = useLocalFileStore(s => s.rootPath)
+  const localWorkspaceId = useLocalFileStore(s => s.workspaceId)
   const streamStatus = useStreamStore(s => s.status)
   const {
-    activeBinding,
-    bindTerminal,
     inputTags,
     addInputTag,
     removeInputTag,
     getInputTagsContent,
     clearInputTags,
     getTerminalSessionByConnection,
+    rekeyBinding,
   } = useSshAgentStore()
 
   // 统一 Agent 后：初始化时自动设置 currentAgentId 为 200000
   useEffect(() => {
-    fetchAgents()
+    void fetchAgents()
+    void loadHistorySessions()
     // 如果 currentAgentId 为空或不是 200000，自动切换
     if (!currentAgentId) {
       useAgentStore.getState().setCurrentAgentId('200000')
     }
-  }, [fetchAgents])
+  }, [fetchAgents, loadHistorySessions])
 
   const currentSession = currentSessionId ? sessions.get(currentSessionId) : null
+  const currentTargetConnection = currentSession?.executionTargetType === 'SSH'
+    ? connections.find(connection => connection.id === currentSession.executionTargetRef)
+    : undefined
+  const targetTerminalSessionId = currentSession?.executionTargetType === 'SSH' && currentSession.executionTargetRef
+    ? getTerminalSessionByConnection(currentSession.executionTargetRef)
+    : undefined
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLDivElement>(null)
@@ -569,11 +610,56 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
   const [showAttachmentMenu, setShowAttachmentMenu] = useState(false)
   const [inputKey, setInputKey] = useState(0)
   const abortRef = useRef<(() => void) | null>(null)
+  // 仅允许停止启动它的确切回合，防止切换会话后误标记另一条会话。
+  const activeTurnRef = useRef<{ sessionId: string; groupId: string } | null>(null)
   const [errorRecovery, setErrorRecovery] = useState<ErrorRecovery | null>(null)
+  const [isRevising, setIsRevising] = useState(false)
+  const [showExecutionTargetMenu, setShowExecutionTargetMenu] = useState(false)
+  const [editingMessage, setEditingMessage] = useState<{
+    sourceSessionId: string
+    messageId: string
+    turnId: string
+    userMessageIndex: number
+  } | null>(null)
 
-  // --- P2: 快捷键面板 & 导出面板 ---
-  const [showShortcutHelp, setShowShortcutHelp] = useState(false)
+  const chooseExecutionTarget = async (
+    target: { type: 'LOCAL' | 'SSH'; reference: string } | null,
+  ) => {
+    if (isLoading || isRevising) return
+    try {
+      if (!currentSessionId) {
+        if (!currentAgentId) throw new Error('Agent 尚未就绪')
+        await createServerSession(currentAgentId, target)
+      } else {
+        await setExecutionTarget(currentSessionId, target)
+      }
+      setShowExecutionTargetMenu(false)
+    } catch (error) {
+      setErrorRecovery({
+        type: 'unknown',
+        title: '切换执行目标失败',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  useEffect(() => {
+    setShowExecutionTargetMenu(false)
+    if (editingMessage && currentSessionId !== editingMessage.sourceSessionId) {
+      setEditingMessage(null)
+      setInputText('')
+      clearInputTags()
+      if (inputRef.current) {
+        inputRef.current.innerHTML = ''
+        inputHtmlRef.current = ''
+      }
+    }
+  }, [currentSessionId, editingMessage, setInputText, clearInputTags])
+
+  // --- 会话操作面板 ---
   const [showChatExport, setShowChatExport] = useState(false)
+  const [showMemoryPanel, setShowMemoryPanel] = useState(false)
+  const [showSessionActionsMenu, setShowSessionActionsMenu] = useState(false)
   // --- 历史记录面板 ---
   const { showHistoryPanel, toggleHistoryPanel } = useAgentStore()
 
@@ -609,20 +695,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       // 仅在 streaming/reconnecting 状态下检测心跳超时
       if ((store.status === 'streaming' || store.status === 'reconnecting') && store.isHeartbeatStale()) {
         console.warn('[SSE] heartbeat stale, stream may be dead')
-        // 中断当前 fetch，让 agent.ts 的 catch 处理重连
+        // 顶层取消会同时通知服务端停止运行；agent.ts 内部的请求超时负责可恢复重试。
+        // 心跳已经长期失联时不能伪装成仍在重连，否则服务端可能留下孤儿任务。
         if (abortRef.current) {
           abortRef.current()
           abortRef.current = null
-          // 设置重连状态，让 agent.ts 的重试逻辑接管
-          store.setRetrying(store.retryCount + 1)
-          setLoading(true)
-        }
-        // 如果已经在 reconnecting 且超过最大重试，显示错误
-        if (store.status === 'reconnecting' && store.retryCount >= store.maxRetries) {
           store.setError('SSE 连接超时，心跳无响应')
-          store.reset()
           setLoading(false)
-          abortRef.current = null
         }
       }
     }, 10_000) // 每 10s 检查一次
@@ -829,64 +908,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     inputHtmlRef.current = ''
   }, [inputKey])
 
-  // --- 全局快捷键：? 打开帮助面板 ---
+  // Esc 仅关闭当前展开的会话工具，不再提供独立的快捷键速查弹窗。
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      // 输入框内不触发，避免干扰正常输入
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) return
-      if (e.key === '?') {
-        e.preventDefault()
-        setShowShortcutHelp(prev => !prev)
-      }
       if (e.key === 'Escape') {
-        setShowShortcutHelp(false)
         setShowChatExport(false)
+        setShowSessionActionsMenu(false)
         if (useAgentStore.getState().showHistoryPanel) useAgentStore.getState().toggleHistoryPanel()
       }
     }
     window.addEventListener('keydown', handleGlobalKeyDown)
     return () => window.removeEventListener('keydown', handleGlobalKeyDown)
   }, [])
-
-  useEffect(() => {
-    const autoBindCurrentConnection = async () => {
-      if (!activeTerminalSessionId) return
-      if (activeBinding?.terminalSessionId === activeTerminalSessionId) return
-      const connection = currentConnectionId
-        ? connections.find((c) => c.id === currentConnectionId)
-        : connections.find((c) => c.status === ConnectionStatus.CONNECTED)
-      if (!connection || connection.status !== ConnectionStatus.CONNECTED) return
-      if (!currentSessionId && currentAgentId) {
-        await createServerSession(currentAgentId)
-      }
-      const sessionId = useAgentStore.getState().currentSessionId
-      if (!sessionId) return
-      const success = await bindTerminal(
-        sessionId,
-        activeTerminalSessionId,
-        {
-          connectionId: connection.id,
-          connectionName: connection.name,
-          host: connection.host,
-          port: connection.port,
-          username: connection.username,
-        }
-      )
-      if (success) {
-      }
-    }
-
-    autoBindCurrentConnection()
-  }, [
-    activeTerminalSessionId,
-    activeBinding,
-    currentConnectionId,
-    connections,
-    currentAgentId,
-    bindTerminal,
-    createServerSession,
-  ])
 
   const insertTagAtCursor = (tag: { id: string; label: string; type: 'terminal-selection' | 'file' | 'custom' | 'connection'; fullContent: string }) => {
     if (!inputRef.current) return
@@ -974,8 +1007,80 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     setShowAttachmentMenu(false)
   }
 
+  const handleLocalFileDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const raw = event.dataTransfer.getData(LOCAL_FILE_DRAG_MIME)
+    if (!raw) return
+
+    try {
+      const dropped = JSON.parse(raw) as { path?: unknown; name?: unknown }
+      if (typeof dropped.path !== 'string') throw new Error('拖放文件信息无效')
+      const boundRoot = currentSession?.executionTargetType === 'LOCAL' ? currentSession.executionTargetRef : null
+      const workspaceAuthorized = Boolean(
+        boundRoot
+        && localWorkspaceId
+        && agentApi.isAuthorizedLocalWorkspaceCwd(boundRoot, localRootPath || undefined),
+      )
+      const relativePath = boundRoot && workspaceAuthorized
+        ? getAuthorizedLocalRelativePath(boundRoot, dropped.path)
+        : null
+      if (!relativePath) {
+        throw new Error('请先恢复此会话绑定的本地项目，再拖入项目内文件。')
+      }
+      addInputTag({
+        label: `文件: ${relativePath}`,
+        fullContent: `已选择本地工作区文件：${relativePath}\n请仅在当前会话绑定项目内读取或修改该文件。`,
+        type: 'file',
+      })
+      inputRef.current?.focus()
+    } catch (error) {
+      setErrorRecovery({
+        type: 'unknown',
+        title: '无法添加本地文件',
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const beginMessageEdit = (messageId: string) => {
+    if (isLoading || isRevising || !currentSessionId || !currentSession) return
+    const messageIndex = currentSession.messages.findIndex(message => message.id === messageId)
+    if (messageIndex < 0) return
+    const message = currentSession.messages[messageIndex]
+    if (message.role !== 'user') return
+    const userMessageIndex = currentSession.messages
+      .slice(0, messageIndex + 1)
+      .filter(item => item.role === 'user').length - 1
+
+    clearInputTags()
+    const editableContent = message.editableContent ?? message.content
+    setEditingMessage({
+      sourceSessionId: currentSessionId,
+      messageId,
+      turnId: message.groupId,
+      userMessageIndex,
+    })
+    setInputText(editableContent)
+    if (inputRef.current) {
+      inputRef.current.innerText = editableContent
+      inputHtmlRef.current = inputRef.current.innerHTML
+      inputRef.current.focus()
+    }
+  }
+
+  const cancelMessageEdit = () => {
+    setEditingMessage(null)
+    setInputText('')
+    clearInputTags()
+    if (inputRef.current) {
+      inputRef.current.innerHTML = ''
+      inputHtmlRef.current = ''
+      inputRef.current.focus()
+    }
+  }
+
   const handleSend = async () => {
-    if (isLoading || !currentAgentId || !inputRef.current) return
+    if (isLoading || isRevising || !currentAgentId || !inputRef.current) return
     // 发送新消息时取消手动滚动，自动滚到底部
     setIsManualScroll(false)
     // 清除之前的错误恢复卡片
@@ -989,10 +1094,31 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     }
 
     if (!currentSessionId) {
-      await createServerSession(currentAgentId)
+      await createServerSession(
+        currentAgentId,
+        localRootPath ? { type: 'LOCAL', reference: localRootPath } : null,
+      )
     }
-    const sessionId = useAgentStore.getState().currentSessionId
+    let sessionId = useAgentStore.getState().currentSessionId
     if (!sessionId) return
+
+    // The file tree is global, but execution scope belongs to the chat
+    // session. Bind an unbound restored chat before building this request so
+    // the first message after opening a project carries the project context.
+    let sessionForSend = useAgentStore.getState().sessions.get(sessionId) ?? null
+    if (sessionForSend && !sessionForSend.executionTargetType && localRootPath) {
+      try {
+        await setExecutionTarget(sessionId, { type: 'LOCAL', reference: localRootPath })
+        sessionForSend = useAgentStore.getState().sessions.get(sessionId) ?? sessionForSend
+      } catch (error) {
+        setErrorRecovery({
+          type: 'unknown',
+          title: '项目绑定失败',
+          message: error instanceof Error ? error.message : String(error),
+        })
+        return
+      }
+    }
 
     let messageContent = plainText
     // displayContent 始终用纯文本/Markdown 格式，不用 domHtml（原始 HTML 含 <span> 标签会导致渲染异常）
@@ -1054,28 +1180,73 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       displayContent = plainText ? `${plainText}\n\n${displayTags}` : displayTags
     }
 
-    // SSH 服务器上下文：优先使用用户 @ 选择的服务器标签，否则自动查找已绑定/已连接的连接
+    // SSH 上下文只来自当前会话的持久化执行目标；@ 标签不能临时改写路由。
     const connectionTag = inputTags.find(t => t.type === 'connection')
+    if (connectionTag?.connectionInfo
+      && (sessionForSend?.executionTargetType !== 'SSH'
+        || sessionForSend.executionTargetRef !== connectionTag.connectionInfo.connectionId)) {
+      setErrorRecovery({
+        type: 'unknown',
+        title: 'SSH 目标不一致',
+        message: '消息中的服务器标签与当前会话执行目标不同，请先在顶部切换执行目标。',
+      })
+      return
+    }
     let sshContextConn: { connectionId: string; connectionName: string; host: string; port: number; username: string } | null = null
-    if (connectionTag?.connectionInfo) {
-      sshContextConn = connectionTag.connectionInfo
-    } else {
-      const selectedConn = activeBinding
-        ? connections.find((c) => c.id === activeBinding.connectionId)
-        : connections.find((c) => c.id === currentConnectionId && c.status === ConnectionStatus.CONNECTED)
-      if (selectedConn) {
-        sshContextConn = {
-          connectionId: selectedConn.id,
-          connectionName: selectedConn.name,
-          host: selectedConn.host,
-          port: selectedConn.port,
-          username: selectedConn.username,
-        }
+    if (currentTargetConnection) {
+      sshContextConn = {
+        connectionId: currentTargetConnection.id,
+        connectionName: currentTargetConnection.name,
+        host: currentTargetConnection.host,
+        port: currentTargetConnection.port,
+        username: currentTargetConnection.username,
       }
     }
-    if (sshContextConn) {
+    const hasExplicitServerTag = Boolean(
+      connectionTag || inputTags.some(tag => tag.type === 'terminal-selection'),
+    )
+    const shouldAttachServerContext = hasExplicitServerTag || SERVER_OPERATION_PATTERN.test(plainText)
+    if (sshContextConn && shouldAttachServerContext) {
       const serverContext = `当前服务器：${sshContextConn.connectionName} (${sshContextConn.username}@${sshContextConn.host}:${sshContextConn.port})`
       messageContent = `${serverContext}\n\n${messageContent}`
+    }
+
+    if (editingMessage) {
+      if (editingMessage.sourceSessionId !== sessionId) {
+        setEditingMessage(null)
+        setErrorRecovery({
+          type: 'unknown',
+          title: '无法修改消息',
+          message: '当前会话已经切换，请在目标会话中重新点击编辑。',
+        })
+        return
+      }
+      setIsRevising(true)
+      try {
+        const revision = await agentApi.reviseSession(
+          editingMessage.sourceSessionId,
+          editingMessage.turnId,
+          editingMessage.userMessageIndex,
+        )
+        applySessionRevision(
+          editingMessage.sourceSessionId,
+          revision.sessionId,
+          editingMessage.messageId,
+        )
+        rekeyBinding(editingMessage.sourceSessionId, revision.sessionId)
+        sessionId = revision.sessionId
+        setEditingMessage(null)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        setErrorRecovery({
+          type: 'unknown',
+          title: '修改消息失败',
+          message,
+        })
+        return
+      } finally {
+        setIsRevising(false)
+      }
     }
 
     const groupId = `group_${Date.now()}`
@@ -1083,6 +1254,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       id: `msg_${Date.now()}`,
       role: 'user',
       content: displayContent,
+      editableContent: plainText,
       timestamp: Date.now(),
       messageType: 'text',
       groupId,
@@ -1102,6 +1274,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     // 多消息流模式：不需要预创建 assistant 消息，各类型消息由回调动态创建
     // 但需要立即创建一个"思考中"占位消息，避免用户以为死机
     addThinkingMessage(sessionId, groupId, '思考中...')
+    activeTurnRef.current = { sessionId, groupId }
     let textMsgId = '' // 同一 groupId 下只有一条 text 消息，onText 时 upsert
     const toolCallMsgMap = new Map<string, string>() // toolCallId → msgId 映射
 
@@ -1186,18 +1359,27 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
                 if (isLocalTool) {
                   const localStore = useLocalFileStore.getState()
-                  if (changedPath && !isDeleteOp) {
+                  if (changedPath && localStore.rootPath) {
+                    changedPath = agentApi.resolveLocalWorkspaceResultPath(localStore.rootPath, changedPath) || undefined
+                  }
+                  const hasToolSnapshot = payload?.hasBeforeContent === true && typeof payload?.beforeContent === 'string'
+                  const toolBeforeContent = hasToolSnapshot ? payload?.beforeContent as string : ''
+                  if (changedPath && isDeleteOp && hasToolSnapshot) {
+                    // Desktop file channel captures deletion content before mutation, so a delete can
+                    // be diffed and restored without guessing that an empty snapshot was available.
+                    useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, hasBeforeContent: true, beforeContent: toolBeforeContent, afterContent: '' })
+                  } else if (changedPath && !isDeleteOp) {
                     const localTab = localStore.openTabs.find(t => !isLocalDiffTab(t) && t.path === changedPath) as LocalOpenTab | undefined
                     const before = localTab?.content ?? ''
                     if (localTab) {
                       // 文件已打开 → reload 更新 tab 内容 + 创建 preview
                       localStore.reloadFileByPath(changedPath).then(after => {
-                        if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, beforeContent: before, afterContent: after })
+                        if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, hasBeforeContent: true, beforeContent: hasToolSnapshot ? toolBeforeContent : before, afterContent: after })
                       }).catch(() => {})
                     } else {
-                      // 文件未打开 → 直接读取文件内容创建 preview（beforeContent 为空）
+                      // 文件未打开时优先使用桌面工具在变更前采集的快照；没有快照仍只读展示。
                       localStore.readFileContent(changedPath).then(after => {
-                        if (after != null) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, beforeContent: '', afterContent: after })
+                        if (after != null) useAiPatchStore.getState().upsertPreview({ target: 'local', path: changedPath!, toolName: step.toolName!, hasBeforeContent: hasToolSnapshot, beforeContent: toolBeforeContent, afterContent: after })
                       }).catch(() => {})
                     }
                   }
@@ -1211,7 +1393,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                 }
 
                 if (!isLocalTool) {
-                  const connId = activeBinding?.connectionId || currentConnectionId
+                  const connId = sessionForSend?.executionTargetType === 'SSH'
+                    ? sessionForSend.executionTargetRef
+                    : null
                   if (connId) {
                     const fileStore = useFileExplorerStore.getState()
                     if (changedPath && !isDeleteOp) {
@@ -1220,12 +1404,12 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                       if (remoteTab && !isDiffTab(remoteTab)) {
                         // 远程文件已打开 → reload 更新 tab 内容 + 创建 preview
                         fileStore.reloadFileByPath(connId, changedPath).then(after => {
-                          if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, beforeContent: before, afterContent: after })
+                          if (after != null && after !== before) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, hasBeforeContent: true, beforeContent: before, afterContent: after })
                         }).catch(() => {})
                       } else {
-                        // 远程文件未打开 → 通过 API 读取文件内容创建 preview（beforeContent 为空）
+                        // 远程文件未打开 → 仅能读取变更后内容，不能把空字符串当作可回退快照。
                         fileStore.readRemoteFileContent(connId, changedPath).then(after => {
-                          if (after != null) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, beforeContent: '', afterContent: after })
+                          if (after != null) useAiPatchStore.getState().upsertPreview({ target: 'remote', path: changedPath!, connectionId: connId, toolName: step.toolName!, hasBeforeContent: false, beforeContent: '', afterContent: after })
                         }).catch(() => {})
                       }
                     }
@@ -1251,30 +1435,31 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         useStreamStore.getState().touchActivity()
       },
       (finalContent: string) => {
+        if (activeTurnRef.current?.sessionId !== sessionId || activeTurnRef.current?.groupId !== groupId) return
         // 完成时清除占位 thinking 消息
         removeThinkingMessages(sessionId, groupId)
+        // 若没有对应的 tool_result，不能把仍在执行的工具伪装成成功。
+        markGroupInProgressAsFailure(sessionId, groupId, '流已结束，但未收到工具完成结果')
         if (finalContent && textMsgId) {
           upsertTextMessage(sessionId, groupId, finalContent)
         } else if (finalContent && !textMsgId) {
           upsertTextMessage(sessionId, groupId, finalContent)
         }
         abortRef.current = null
+        activeTurnRef.current = null
         setLoading(false)
         // 仅在无错误时重置 streamStore（部分交付时 onError 已先触发）
         const streamState = useStreamStore.getState()
         if (streamState.status !== 'error') {
           streamState.reset()
         }
-        const outputStore = useOutputStore.getState()
-        outputStore.entries.forEach((entry) => {
-          if (entry.status === 'running' && entry.sessionId.startsWith('tool-')) {
-            outputStore.updateEntry(entry.sessionId, { status: 'success' })
-          }
-        })
+        useOutputStore.getState().markRunningEntriesAsUnconfirmed()
       },
       (err: string) => {
+        if (activeTurnRef.current?.sessionId !== sessionId || activeTurnRef.current?.groupId !== groupId) return
         console.error('[reactChatStream] error:', err)
         abortRef.current = null
+        activeTurnRef.current = null
         setLoading(false)
         useStreamStore.getState().setError(err)
 
@@ -1282,6 +1467,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         removeThinkingMessages(sessionId, groupId)
 
         const userFriendlyMsg = extractErrorMessage(err)
+        markGroupInProgressAsFailure(sessionId, groupId, `请求流异常：${userFriendlyMsg}`)
+        useOutputStore.getState().markRunningEntriesAsUnconfirmed()
         addErrorMessage(sessionId, groupId, `请求失败: ${userFriendlyMsg}`)
 
         let errorType: ErrorRecovery['type'] = 'unknown'
@@ -1304,13 +1491,12 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           details: userFriendlyMsg !== err ? err : undefined,
         })
       },
-      // terminalSessionId：优先使用 @ 服务器标签对应终端会话
+      // terminalSessionId 只能由会话级 SSH 目标解析，禁止当前连接或 @ 标签覆盖。
       (() => {
-        if (connectionTag?.connectionInfo) {
-          const tsId = getTerminalSessionByConnection(connectionTag.connectionInfo.connectionId)
-          if (tsId) return tsId
+        if (sessionForSend?.executionTargetType === 'SSH' && sessionForSend.executionTargetRef) {
+          return getTerminalSessionByConnection(sessionForSend.executionTargetRef)
         }
-        return activeTerminalSessionId || undefined
+        return undefined
       })(),
       // onTaskBreakdown
       (_breakdown: TaskBreakdownDTO) => {
@@ -1331,7 +1517,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
 
         const localStore = useLocalFileStore.getState()
         const patchStore = useAiPatchStore.getState()
-        const connId = activeBinding?.connectionId || currentConnectionId
+        const connId = sessionForSend?.executionTargetType === 'SSH'
+          ? sessionForSend.executionTargetRef
+          : null
 
         for (const file of changedFiles) {
           // ── 本地文件变更 → 创建 AiPatchPreview ──
@@ -1344,6 +1532,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   target: 'local',
                   path: file.path,
                   toolName: file.kind === 'create' ? 'createLocalFile' : 'writeLocalFile',
+                  hasBeforeContent: true,
                   beforeContent: before,
                   afterContent: after,
                 })
@@ -1358,7 +1547,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   target: 'local',
                   path: fullPath,
                   toolName: file.kind === 'create' ? 'createLocalFile' : 'writeLocalFile',
-                  beforeContent: '',  // 未打开的文件无 beforeContent
+                  hasBeforeContent: false,
+                  beforeContent: '',
                   afterContent: after,
                 })
               }
@@ -1378,6 +1568,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                     path: file.path,
                     connectionId: connId,
                     toolName: file.kind === 'create' ? 'createFile' : 'writeFile',
+                    hasBeforeContent: true,
                     beforeContent: before,
                     afterContent: after,
                   })
@@ -1392,6 +1583,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                     path: file.path,
                     connectionId: connId,
                     toolName: file.kind === 'create' ? 'createFile' : 'writeFile',
+                    hasBeforeContent: false,
                     beforeContent: '',
                     afterContent: after,
                   })
@@ -1401,17 +1593,19 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           }
         }
       },
-      // projectContext: 注入当前打开的工程信息（本地文件夹 + 远程 SSH）
+      // projectContext 必须与会话级执行目标一致，不能使用全局当前文件树兜底。
       (() => {
-        // 优先取本地文件树
-        const localRoot = useLocalFileStore.getState().rootPath
-        if (localRoot) {
-          const name = localRoot.split('/').filter(Boolean).pop() || ''
-          return name ? { name, rootPath: localRoot } : null
+        if (sessionForSend?.executionTargetType === 'LOCAL' && sessionForSend.executionTargetRef) {
+          const root = sessionForSend.executionTargetRef
+          const name = root.replace(/\\/g, '/').split('/').filter(Boolean).pop() || ''
+          const workspaceId = localWorkspaceId && agentApi.isAuthorizedLocalWorkspaceCwd(root, localRootPath || undefined)
+            ? localWorkspaceId
+            : undefined
+          return name ? { name, rootPath: root, workspaceId } : null
         }
-        // 兜底：取远程 SSH 文件树的当前工作目录
-        const remoteCwd = currentPathByConnection[activeConnectionId || '']
-        if (remoteCwd) {
+        if (sessionForSend?.executionTargetType === 'SSH' && sessionForSend.executionTargetRef) {
+          const remoteCwd = currentPathByConnection[sessionForSend.executionTargetRef]
+          if (!remoteCwd) return null
           const name = remoteCwd.split('/').filter(Boolean).pop() || ''
           return name ? { name, rootPath: remoteCwd } : null
         }
@@ -1468,27 +1662,57 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       },
       // inlineDatas: 多模态图片数据
       inlineDatas.length > 0 ? inlineDatas : undefined,
+      // turnId: 本次用户消息及全部 Agent 输出的稳定回合边界
+      groupId,
+      // Only an explicit selection in the Harness timeline binds the next
+      // message to an existing task. Ordinary chat always starts a new task.
+      currentSessionId ? useHarnessStore.getState().consumeTaskContinuation(currentSessionId) : undefined,
+      // onRunState: 只保存服务端可重建的状态投影
+      (runState) => {
+        useHarnessStore.getState().applyRunState(runState)
+      },
+      // Native local-file mutations are completed on the desktop side before
+      // the server emits its normal tool-result step. Refresh immediately so
+      // the explorer does not wait for a later model event (or stay stale).
+      (_operation, changedPath) => {
+        const localStore = useLocalFileStore.getState()
+        if (!localStore.rootPath) return
+        const absolutePath = agentApi.resolveLocalWorkspaceResultPath(localStore.rootPath, changedPath)
+          || (changedPath.replace(/\\/g, '/').toLowerCase().startsWith(localStore.rootPath.replace(/\\/g, '/').toLowerCase())
+            ? changedPath
+            : null)
+        const normalizedRoot = localStore.rootPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+        const normalizedPath = absolutePath?.replace(/\\/g, '/').replace(/\/+$/, '') || ''
+        const parentPath = normalizedPath.includes('/') ? normalizedPath.slice(0, normalizedPath.lastIndexOf('/')) : ''
+
+        // Always refresh the represented root. If an expanded nested directory
+        // was changed, refresh that node too so its visible children stay exact.
+        void localStore.refreshDirectory(localStore.rootPath).catch(() => {})
+        if (parentPath && parentPath.toLowerCase() !== normalizedRoot) {
+          void localStore.refreshDirectory(parentPath).catch(() => {})
+        }
+        if (absolutePath) void localStore.reloadFileByPath(absolutePath).catch(() => {})
+      },
     )
   }
 
   const handleStop = () => {
-    if (abortRef.current) {
-      abortRef.current()
-      abortRef.current = null
-      setLoading(false)
-    }
-    toolProgressStore.clear()
+    const activeTurn = activeTurnRef.current
+    if (!activeTurn) return
 
-    // 将当前 groupId 下所有 in_progress 工具消息标记为 failure
-    if (currentSessionId) {
-      const session = sessions.get(currentSessionId)
-      if (session) {
-        const lastUserMsg = [...session.messages].reverse().find(m => m.role === 'user')
-        if (lastUserMsg?.groupId) {
-          markGroupInProgressAsFailure(currentSessionId, lastUserMsg.groupId)
-        }
-      }
-    }
+    // reactChatStream 会同步关闭 SSE，并异步通知服务端取消同一 runId；其本地命令也会被终止。
+    abortRef.current?.()
+    abortRef.current = null
+    activeTurnRef.current = null
+    setLoading(false)
+    toolProgressStore.clear()
+    usePermissionStore.getState().clearAll()
+    useStreamStore.getState().setStatus('stopped')
+    useStreamStore.getState().setStatusMessage(null)
+
+    removeThinkingMessages(activeTurn.sessionId, activeTurn.groupId)
+    markGroupInProgressAsFailure(activeTurn.sessionId, activeTurn.groupId, '用户已停止本次对话')
+    addNoticeMessage(activeTurn.sessionId, activeTurn.groupId, '本次对话已停止；正在执行的工具与待确认操作已取消。')
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1499,6 +1723,8 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     // Ctrl/Cmd+L: 清空输入框
     if (isModifier && e.key === 'l') {
       e.preventDefault()
+      setEditingMessage(null)
+      setInputText('')
       if (inputRef.current) {
         inputRef.current.innerHTML = ''
         inputRef.current.focus()
@@ -1565,29 +1791,137 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
     setShowSendModeDropdown(false)
   }
 
-  const canSend = (inputRef.current?.innerText.trim() || inputTags.length > 0) && currentAgentId && !isLoading
+  const canSend = (inputRef.current?.innerText.trim() || inputTags.length > 0) && currentAgentId && !isLoading && !isRevising
 
   return (
     <div className="relative flex flex-col h-full flex-shrink-0 overflow-hidden" style={{ width, backgroundColor: colors.bgPrimary }}>
       <PermissionConfirmModal />
       <StreamStatusBar />
+      <HarnessRunStatusBar />
       {/* 工具进度条 */}
       <ToolProgressBar />
-      {(() => {
-        const conn = activeBinding
-          ? connections.find((c) => c.id === activeBinding.connectionId)
-          : connections.find((c) => c.id === currentConnectionId)
-        if (!conn) return null
-        const connected = conn.status === 1
-        return (
-          <div className="flex items-center gap-2 px-4 py-1.5 border-b" style={{ backgroundColor: connected ? `${colors.accent}08` : `${colors.textDim}06`, borderColor: colors.border }}>
-            <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: connected ? '#22c55e' : colors.textDim }} />
-            <span className="text-[11px] truncate" style={{ color: colors.textDim }}>
-              {conn.name}（{conn.username}@{conn.host}）{connected ? '' : ' · 未连接'}
+      <div className="flex items-center gap-2 px-3 py-2 border-b flex-shrink-0" style={{ borderColor: colors.border, backgroundColor: colors.bgSecondary }}>
+        <button
+          type="button"
+          disabled={!currentAgentId || isLoading || isRevising}
+          onClick={() => currentAgentId && void newConversation(currentAgentId)}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-85"
+          style={{ backgroundColor: colors.accent, color: '#fff' }}
+          title="新建会话"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+          新建
+        </button>
+        <button
+          type="button"
+          onClick={toggleHistoryPanel}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium hover:bg-black/10"
+          style={{ backgroundColor: showHistoryPanel ? `${colors.accent}18` : colors.bgTertiary, color: showHistoryPanel ? colors.accent : colors.textSecondary, border: `1px solid ${showHistoryPanel ? `${colors.accent}40` : 'transparent'}` }}
+          title="对话历史"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+          历史
+        </button>
+        <div className="flex-1" />
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setShowSessionActionsMenu(value => !value)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-medium hover:bg-black/10"
+            style={{ backgroundColor: showSessionActionsMenu ? `${colors.accent}18` : colors.bgTertiary, color: showSessionActionsMenu ? colors.accent : colors.textSecondary }}
+            title="更多会话操作"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="5" cy="12" r="1" fill="currentColor" /><circle cx="12" cy="12" r="1" fill="currentColor" /><circle cx="19" cy="12" r="1" fill="currentColor" /></svg>
+            更多
+          </button>
+          {showSessionActionsMenu && (
+            <div className="absolute right-0 top-full z-50 mt-1 min-w-[150px] overflow-hidden rounded-lg shadow-xl" style={{ backgroundColor: colors.bgPrimary, border: `1px solid ${colors.border}` }}>
+              <button
+                type="button"
+                onClick={() => { setShowMemoryPanel(true); setShowSessionActionsMenu(false) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] hover:bg-white/5"
+                style={{ color: colors.text }}
+              >
+                <span>🧠</span><span>长期记忆</span>
+              </button>
+              <button
+                type="button"
+                disabled={!currentSession}
+                onClick={() => { setShowChatExport(true); setShowSessionActionsMenu(false) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-left text-[11px] hover:bg-white/5 disabled:opacity-45 disabled:cursor-not-allowed"
+                style={{ color: colors.text, borderTop: `1px solid ${colors.border}` }}
+              >
+                <span>⇩</span><span>导出对话</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="relative border-b" style={{ borderColor: colors.border }}>
+        <button
+          type="button"
+          disabled={isLoading || isRevising}
+          onClick={() => setShowExecutionTargetMenu(value => !value)}
+          className="w-full flex items-center gap-2 px-4 py-1.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
+          style={{ backgroundColor: `${colors.accent}08` }}
+          title="选择本会话唯一的命令与文件执行目标"
+        >
+          <span className="text-[11px] flex-shrink-0" style={{ color: colors.textDim }}>执行目标</span>
+          <span className="min-w-0 flex-1" style={{ color: colors.text }}>
+            <span className="block text-[11px] truncate">
+              {currentSession?.executionTargetType === 'LOCAL'
+                ? `💻 本地 · ${currentSession.executionTargetRef}`
+                : currentSession?.executionTargetType === 'SSH'
+                  ? `🌐 SSH · ${currentTargetConnection?.name || currentSession.executionTargetRef}${currentTargetConnection?.status === ConnectionStatus.CONNECTED ? '' : ' · 未连接'}`
+                  : '未选择（仅聊天）'}
             </span>
+            {currentSession?.executionTargetType === 'LOCAL' && (
+              <span className="block text-[9px] truncate" style={{ color: colors.textDim }}>
+                桌面 Agent：命令、文件读写、构建和测试均限制在该授权根目录；写入、创建和删除会再次确认
+              </span>
+            )}
+          </span>
+          <span className="text-[10px]" style={{ color: colors.textDim }}>▾</span>
+        </button>
+        {showExecutionTargetMenu && (
+          <div
+            className="absolute left-3 right-3 top-full z-50 mt-1 rounded-lg overflow-hidden shadow-xl"
+            style={{ backgroundColor: colors.bgSecondary, border: `1px solid ${colors.border}` }}
+          >
+            <button
+              type="button"
+              disabled={!localRootPath}
+              onClick={() => localRootPath && void chooseExecutionTarget({ type: 'LOCAL', reference: localRootPath })}
+              className="w-full px-3 py-2 text-left text-[11px] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ color: colors.text }}
+            >
+              <div>💻 本地项目</div>
+              <div className="truncate mt-0.5" style={{ color: colors.textDim }}>{localRootPath || '请先打开本地文件夹'}</div>
+            </button>
+            {connections.map(connection => (
+              <button
+                key={connection.id}
+                type="button"
+                onClick={() => void chooseExecutionTarget({ type: 'SSH', reference: connection.id })}
+                className="w-full px-3 py-2 text-left text-[11px] hover:bg-white/5 border-t"
+                style={{ color: colors.text, borderColor: colors.border }}
+              >
+                <div>🌐 SSH · {connection.name}{connection.status === ConnectionStatus.CONNECTED ? '' : ' · 未连接'}</div>
+                <div className="truncate mt-0.5" style={{ color: colors.textDim }}>{connection.username}@{connection.host}:{connection.port}</div>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => void chooseExecutionTarget(null)}
+              className="w-full px-3 py-2 text-left text-[11px] hover:bg-white/5 border-t"
+              style={{ color: colors.textDim, borderColor: colors.border }}
+            >
+              仅聊天（不绑定执行目标）
+            </button>
           </div>
-        )
-      })()}
+        )}
+      </div>
 
       <div
         ref={messagesContainerRef}
@@ -1703,12 +2037,11 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   return (
                     <React.Fragment key={`single_${item.msg.id}_${idx}`}>
                       {dividerEl}
-                      <MessageBubble message={item.msg} isLoading={false} onEditRetry={(msgId) => {
-                        if (currentSessionId) {
-                          editAndRetry(currentSessionId, msgId)
-                          setTimeout(() => inputRef.current?.focus(), 50)
-                        }
-                      }} />
+                      <MessageBubble
+                        message={item.msg}
+                        isLoading={false}
+                        onEditRetry={isLoading || isRevising ? undefined : beginMessageEdit}
+                      />
                     </React.Fragment>
                   )
                 }
@@ -1802,7 +2135,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
       <ArtifactSummaryPanel />
 
       {/* SSH 未连接提示（统一 Agent：远程工具需要 SSH 连接） */}
-      {!activeTerminalSessionId && (
+      {currentSession?.executionTargetType === 'SSH' && !targetTerminalSessionId && (
         <div className="flex items-center gap-2 px-4 py-1.5 text-[11px] flex-shrink-0" style={{ backgroundColor: 'rgba(245,158,11,0.1)', color: '#f59e0b', borderBottom: `1px solid ${colors.border}` }}>
           <svg className="w-3 h-3 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
@@ -1811,47 +2144,28 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
         </div>
       )}
 
-      <div className="flex items-center justify-between px-4 py-2 border-t flex-shrink-0" style={{ backgroundColor: colors.bgSecondary, borderColor: colors.border }}>
-        <div className="flex items-center gap-2">
-          <button className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }}>
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
-            </svg>
-            拆解
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button onClick={() => currentAgentId && newConversation(currentAgentId)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="新建会话">
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="12" y1="5" x2="12" y2="19"></line>
-              <line x1="5" y1="12" x2="19" y2="12"></line>
-            </svg>
-          </button>
-          <button onClick={() => setShowChatExport(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="导出对话">
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-          </button>
-          <button onClick={() => setShowShortcutHelp(true)} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary, border: '1px solid transparent' }} title="快捷键">
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="6" width="20" height="12" rx="2" />
-              <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M8 14h8" />
-            </svg>
-          </button>
-          <button onClick={toggleHistoryPanel} className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:opacity-80" style={{ backgroundColor: showHistoryPanel ? `${colors.accent}20` : colors.bgTertiary, color: showHistoryPanel ? colors.accent : colors.textSecondary, border: `1px solid ${showHistoryPanel ? `${colors.accent}40` : 'transparent'}` }} title="历史记录">
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <polyline points="12 6 12 12 16 14"></polyline>
-            </svg>
-          </button>
-        </div>
-      </div>
-
       <div className="flex flex-col relative px-4 pt-2 pb-3 flex-shrink-0" style={{ backgroundColor: colors.bgSecondary }}>
         <div className="relative w-full rounded-lg border transition-all flex flex-col" style={{ backgroundColor: colors.bgInput, borderColor: isFocused ? `${colors.accent}80` : colors.border, boxShadow: isFocused ? `0 0 0 1px ${colors.accent}30` : 'none' }}>
+          {editingMessage && (
+            <div
+              className="flex items-center gap-2 px-3 py-2 text-[11px]"
+              style={{ color: colors.textSecondary, borderBottom: `1px solid ${colors.border}` }}
+            >
+              <span style={{ color: colors.accent }}>正在修改历史消息</span>
+              <span className="flex-1 truncate" style={{ color: colors.textDim }}>
+                发送后将从这里重新生成，后续对话会被替换
+              </span>
+              <button
+                type="button"
+                onClick={cancelMessageEdit}
+                disabled={isRevising}
+                className="px-1.5 py-0.5 rounded hover:opacity-80 disabled:opacity-50"
+                style={{ backgroundColor: colors.bgTertiary, color: colors.textSecondary }}
+              >
+                取消
+              </button>
+            </div>
+          )}
           {inputTags.length > 0 && (
             <div className="flex flex-wrap gap-2 px-3 pt-3 pb-1 max-h-[100px] overflow-y-auto">
               {inputTags.map((tag) => (
@@ -1886,7 +2200,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                       }
                     } else if (tag.type === 'terminal-selection') {
                       // 终端选中文本标签 - 提示已在终端上下文
-                      const tSessionId = activeBinding?.terminalSessionId
+                      const tSessionId = targetTerminalSessionId
                       if (tSessionId) {
                         // 触发终端聚焦（如果有全局事件）
                         window.dispatchEvent(new CustomEvent('focus-terminal', { detail: { sessionId: tSessionId } }))
@@ -1935,7 +2249,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           <div
             key={inputKey}
             ref={inputRef}
-            contentEditable={!isLoading}
+            contentEditable={!isLoading && !isRevising}
             suppressContentEditableWarning
             onInput={(e) => {
               setInputText(e.currentTarget.innerText.replace(/\u00a0/g, ' '))
@@ -1991,6 +2305,13 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
               document.execCommand('insertText', false, cleanText)
               syncInputTextFromDom()
             }}
+            onDragOver={(event) => {
+              if (event.dataTransfer.types.includes(LOCAL_FILE_DRAG_MIME)) {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+              }
+            }}
+            onDrop={handleLocalFileDrop}
             className="w-full bg-transparent resize-none outline-none text-[13px] leading-relaxed flex-1 whitespace-pre-wrap break-words min-h-[120px] max-h-[280px] overflow-y-auto"
             style={{
               color: isLoading ? colors.textDim : colors.text,
@@ -1999,7 +2320,7 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           />
 
           {(!inputText || inputText.trim() === '') && inputTags.length === 0 && (
-            <div className="absolute pointer-events-none text-sm" style={{ left: '16px', top: '8px', color: colors.textDim, opacity: 0.6 }}>
+            <div className="absolute pointer-events-none text-sm" style={{ left: '16px', top: editingMessage ? '41px' : '8px', color: colors.textDim, opacity: 0.6 }}>
               {inputPlaceholder()}
             </div>
           )}
@@ -2057,10 +2378,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
               />
             </label>
             {isLoading ? (
-              <button onClick={handleStop} className="p-1.5 rounded-md transition-colors" style={{ backgroundColor: colors.red, color: '#fff' }} title="停止">
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+              <button
+                type="button"
+                onClick={handleStop}
+                className="flex items-center gap-1.5 px-2 py-1.5 rounded-md text-[11px] font-medium transition-colors"
+                style={{ backgroundColor: colors.red, color: '#fff' }}
+                title="停止生成并取消当前运行"
+                aria-label="停止生成并取消当前运行"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
                   <rect x="6" y="6" width="12" height="12" rx="2" />
                 </svg>
+                <span>停止生成</span>
               </button>
             ) : (
               <button onClick={handleSend} disabled={!canSend} className="p-1.5 rounded-md transition-colors" style={{ backgroundColor: canSend ? colors.accent : colors.bgTertiary, color: canSend ? '#fff' : colors.textSecondary, opacity: canSend ? 1 : 0.5, cursor: canSend ? 'pointer' : 'not-allowed' }} title="发送">
@@ -2101,9 +2430,9 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
                   window.dispatchEvent(new CustomEvent('open-ssh-modal'))
                 } else if (item.id === 'disconnect') {
                   // 断开当前活跃连接
-                  const conn = activeBinding
-                    ? connections.find(c => c.id === activeBinding.connectionId)
-                    : connections.find(c => c.id === currentConnectionId)
+                  const conn = currentSession?.executionTargetType === 'SSH'
+                    ? connections.find(c => c.id === currentSession.executionTargetRef)
+                    : undefined
                   if (conn) {
                     useConnectionStore.getState().disconnect(conn.id)
                   }
@@ -2234,14 +2563,18 @@ export function RightSidebar({ width = 400, activeTerminalSessionId }: RightSide
           </div>
         </div>
       </div>
-      {/* P2: 快捷键面板 */}
-      <ShortcutHelp open={showShortcutHelp} onClose={() => setShowShortcutHelp(false)} />
       {/* P2: 导出面板 */}
       <ChatExport
         open={showChatExport}
         onClose={() => setShowChatExport(false)}
         messages={currentSession?.messages || []}
         sessionTitle={currentSession?.name}
+      />
+      <MemoryPanel
+        open={showMemoryPanel}
+        onClose={() => setShowMemoryPanel(false)}
+        sessionId={currentSessionId}
+        projectRootPath={localRootPath || null}
       />
     </div>
   )

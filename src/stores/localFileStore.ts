@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import {
   readDir,
   readTextFile,
@@ -164,8 +164,23 @@ async function readVisibleEntries(dirPath: string): Promise<DirEntry[]> {
   return filterVisibleEntries(entries)
 }
 
+/**
+ * Windows 本地工作区的路径比较。历史会话保存的是目录引用而不是目录权限，
+ * 因此恢复时必须确认用户在原生选择器中再次选择了同一个根目录。
+ */
+export function isSameLocalWorkspacePath(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false
+  const normalize = (value: string) => value
+    .replace(/[\\/]+/g, '\\')
+    .replace(/\\+$/, '')
+    .toLocaleLowerCase()
+  return normalize(left) === normalize(right)
+}
+
 interface LocalFileStore {
   rootPath: string | null
+  /** 原生目录选择器签发的临时工作区授权标识。 */
+  workspaceId: string | null
   tree: LocalFileNode[]
   expandedPaths: Set<string>
   selectedPath: string | null
@@ -198,6 +213,11 @@ interface LocalFileStore {
   setSelectedPath: (path: string | null) => void
   closeFolder: () => void
   restoreFolder: () => Promise<boolean>
+  /**
+   * 为历史会话重新选择它绑定的项目目录。不会接受其它目录替代原会话目标。
+   * 返回 true 仅表示已拿到该目录的新原生授权并完成文件树加载。
+   */
+  restoreBoundFolder: (expectedRootPath: string) => Promise<boolean>
   /** 打开本地文件的 Diff 标签页 */
   openDiffTab: (previewId: string) => void
   /** 关闭本地文件的 Diff 标签页 */
@@ -233,6 +253,7 @@ function clearSavedFolder() {
 
 export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
   rootPath: null,
+  workspaceId: null,
   tree: [],
   expandedPaths: new Set(),
   selectedPath: null,
@@ -242,31 +263,45 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
   activeTabKey: null,
 
   openFolder: async () => {
+    let selectedWorkspaceId: string | null = null
     try {
-      const selected = await openDialog({
-        directory: true,
-        multiple: false,
-        title: '选择文件夹',
-      })
-
-      if (!selected || typeof selected !== 'string') return
+      const selected = await invoke<{ workspaceId: string; rootPath: string } | null>('select_local_workspace')
+      if (!selected) return
+      selectedWorkspaceId = selected.workspaceId
 
       set({ loading: true, error: null })
 
-      const tree = await get().readDirectory(selected, 1)
+      const tree = await get().readDirectory(selected.rootPath, 1)
+
+      const previousWorkspaceId = get().workspaceId
 
       set({
-        rootPath: selected,
+        rootPath: selected.rootPath,
+        workspaceId: selected.workspaceId,
         tree,
-        expandedPaths: new Set([selected]),
+        expandedPaths: new Set([selected.rootPath]),
         loading: false,
         openTabs: [],
         activeTabKey: null,
         selectedPath: null,
       })
-      saveFolder(selected)
+      if (previousWorkspaceId && previousWorkspaceId !== selected.workspaceId) {
+        void invoke('revoke_local_workspace', { workspaceId: previousWorkspaceId }).catch(() => {})
+      }
+      saveFolder(selected.rootPath)
     } catch (err: any) {
-      set({ loading: false, error: err?.message || '打开文件夹失败' })
+      if (selectedWorkspaceId) {
+        void invoke('revoke_local_workspace', { workspaceId: selectedWorkspaceId }).catch(() => {})
+      }
+      const message = err instanceof Error ? err.message : String(err || '打开文件夹失败')
+      set({
+        rootPath: null,
+        workspaceId: null,
+        tree: [],
+        expandedPaths: new Set(),
+        loading: false,
+        error: message,
+      })
     }
   },
 
@@ -351,7 +386,8 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
         result.push(node)
       }
     } catch (err) {
-      console.error('readDirectory error:', dirPath, err)
+      console.error('readDirectory error:', err instanceof Error ? err.name : 'unknown')
+      throw err
     }
 
     // 目录在前，文件在后
@@ -377,31 +413,16 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
   },
 
   expandDirectory: async (path: string) => {
-    /**
-     * 在树中找到目标目录节点并加载其 children。
-     * 使用不可变更新确保 React 检测到变化。
-     */
-    const loadChildren = (nodes: LocalFileNode[]): LocalFileNode[] => {
-      return nodes.map((node) => {
-        if (node.path === path && node.directory && !node.loaded) {
-          // 异步加载子节点
-          get().readDirectory(path, 1).then((children) => {
-            set((state) => ({
-              tree: updateNodeInTree(state.tree, path, { children, loaded: true }),
-            }))
-          }).catch(() => {})
-          return { ...node, children: [], loaded: false } // 占位，实际由上面的 set 更新
-        }
-        if (node.children && node.children.length > 0) {
-          return { ...node, children: loadChildren(node.children) }
-        }
-        return node
-      })
-    }
+    const node = findNodeInTree(get().tree, path)
+    if (!node || !node.directory || node.loaded) return
 
-    const newTree = loadChildren(get().tree)
-    // 如果有变化才更新（避免不必要的渲染）
-    set({ tree: newTree })
+    // A caller such as expandPathTo awaits this operation before it selects a
+    // file.  Do not resolve early and leave React with an empty placeholder
+    // subtree: that race made nested folders intermittently appear empty.
+    const children = await get().readDirectory(path, 1)
+    set((state) => ({
+      tree: updateNodeInTree(state.tree, path, { children, loaded: true }),
+    }))
   },
 
   openFile: async (path: string) => {
@@ -442,7 +463,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
         ),
       }))
     } catch (err: any) {
-      console.error('readTextFile error:', path, err)
+      console.error('readTextFile error:', err instanceof Error ? err.name : 'unknown')
       set((state) => ({
         openTabs: state.openTabs.map((t) =>
           t.key === key ? { ...t, loading: false, error: err?.message || '无法读取文件' } : t
@@ -509,8 +530,15 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
 
   refreshDirectory: async (path: string) => {
     const children = await get().readDirectory(path, 1)
+    const rootPath = get().rootPath
     set((state) => ({
-      tree: updateNodeInTree(state.tree, path, { children, loaded: true }),
+      // The workspace root is represented by `tree` itself, rather than by a
+      // LocalFileNode. Updating it through updateNodeInTree is therefore a
+      // no-op and made the visible root stale after Agent-created files.
+      tree: rootPath && path.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+        === rootPath.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+        ? children
+        : updateNodeInTree(state.tree, path, { children, loaded: true }),
     }))
   },
 
@@ -527,7 +555,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
         ),
       }))
     } catch (err: any) {
-      console.error('[localFileStore] reloadActiveFile error:', tab.path, err)
+      console.error('[localFileStore] reloadActiveFile error:', err instanceof Error ? err.name : 'unknown')
     }
   },
 
@@ -543,7 +571,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       }))
       return content
     } catch (err: any) {
-      console.error('[localFileStore] reloadFileByPath error:', path, err)
+      console.error('[localFileStore] reloadFileByPath error:', err instanceof Error ? err.name : 'unknown')
       return null
     }
   },
@@ -553,7 +581,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       const content = await readTextFile(path)
       return content
     } catch (err: any) {
-      console.error('[localFileStore] readFileContent error:', path, err)
+      console.error('[localFileStore] readFileContent error:', err instanceof Error ? err.name : 'unknown')
       return null
     }
   },
@@ -568,7 +596,7 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
       }))
       return true
     } catch (err: any) {
-      console.error('[localFileStore] restoreFileContent error:', path, err)
+      console.error('[localFileStore] restoreFileContent error:', err instanceof Error ? err.name : 'unknown')
       set((state) => ({
         openTabs: state.openTabs.map((t) =>
           t.path === path ? { ...t, error: err?.message || '恢复文件失败' } : t
@@ -581,9 +609,14 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
   setSelectedPath: (path) => set({ selectedPath: path }),
 
   closeFolder: () => {
+    const workspaceId = get().workspaceId
+    if (workspaceId) {
+      void invoke('revoke_local_workspace', { workspaceId }).catch(() => {})
+    }
     clearSavedFolder()
     set({
       rootPath: null,
+      workspaceId: null,
       tree: [],
       expandedPaths: new Set(),
       selectedPath: null,
@@ -598,18 +631,64 @@ export const useLocalFileStore = create<LocalFileStore>((set, get) => ({
 
     try {
       set({ loading: true, error: null })
-      const tree = await get().readDirectory(saved, 1)
-      set({
-        rootPath: saved,
-        tree,
-        expandedPaths: new Set([saved]),
-        loading: false,
-      })
-      return true
+      // A persisted path is not authority. Native dialog selection grants the
+      // filesystem scope for this app session; startup must never restore it.
+      clearSavedFolder()
+      set({ loading: false, error: null })
+      return false
     } catch (err: any) {
       // 保存的路径可能不存在了，清除它
       clearSavedFolder()
       set({ loading: false, error: null })
+      return false
+    }
+  },
+
+  restoreBoundFolder: async (expectedRootPath: string): Promise<boolean> => {
+    const current = get()
+    if (isSameLocalWorkspacePath(current.rootPath, expectedRootPath) && current.workspaceId) {
+      return true
+    }
+
+    let selectedWorkspaceId: string | null = null
+    try {
+      const selected = await invoke<{ workspaceId: string; rootPath: string } | null>('select_local_workspace')
+      if (!selected) return false
+      selectedWorkspaceId = selected.workspaceId
+
+      if (!isSameLocalWorkspacePath(selected.rootPath, expectedRootPath)) {
+        void invoke('revoke_local_workspace', { workspaceId: selected.workspaceId }).catch(() => {})
+        set({
+          loading: false,
+          error: '所选文件夹与该历史会话绑定的项目不一致；未恢复本地文件访问。',
+        })
+        return false
+      }
+
+      set({ loading: true, error: null })
+      const tree = await get().readDirectory(selected.rootPath, 1)
+      const previousWorkspaceId = get().workspaceId
+      set({
+        rootPath: selected.rootPath,
+        workspaceId: selected.workspaceId,
+        tree,
+        expandedPaths: new Set([selected.rootPath]),
+        selectedPath: null,
+        openTabs: [],
+        activeTabKey: null,
+        loading: false,
+      })
+      if (previousWorkspaceId && previousWorkspaceId !== selected.workspaceId) {
+        void invoke('revoke_local_workspace', { workspaceId: previousWorkspaceId }).catch(() => {})
+      }
+      saveFolder(selected.rootPath)
+      return true
+    } catch (err: any) {
+      if (selectedWorkspaceId) {
+        void invoke('revoke_local_workspace', { workspaceId: selectedWorkspaceId }).catch(() => {})
+      }
+      const message = err instanceof Error ? err.message : String(err || '恢复会话项目失败')
+      set({ loading: false, error: message })
       return false
     }
   },
@@ -703,4 +782,15 @@ function updateNodeInTree(
     }
     return node
   })
+}
+
+function findNodeInTree(nodes: LocalFileNode[], targetPath: string): LocalFileNode | undefined {
+  for (const node of nodes) {
+    if (node.path === targetPath) return node
+    if (node.children) {
+      const found = findNodeInTree(node.children, targetPath)
+      if (found) return found
+    }
+  }
+  return undefined
 }

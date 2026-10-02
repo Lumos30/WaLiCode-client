@@ -7,7 +7,7 @@
  * 功能：
  * - 显示工具名称、参数、风险等级、风险原因
  * - 倒计时超时（如配置了 timeoutMs）
- * - 用户可「确认执行」「拒绝」「编辑参数后确认」
+ * - 用户可「确认执行」或「拒绝」原始参数
  * - 风险等级颜色区分：DENY=红 / CONFIRM=橙 / ALLOW=绿
  * - 键盘快捷键：Enter=确认 / Esc=拒绝
  */
@@ -24,23 +24,19 @@ const RISK_COLORS: Record<string, { bg: string; border: string; text: string; la
 
 export function PermissionConfirmModal() {
   const { colors } = useThemeStore()
-  const { current, resolveConfirmation } = usePermissionStore()
+  const { current, resolving, error, resolveConfirmation, dismissCurrent } = usePermissionStore()
   const [countdown, setCountdown] = useState<number | null>(null)
-  const [editMode, setEditMode] = useState(false)
-  const [editedArgs, setEditedArgs] = useState('')
   const countdownTimerRef = useRef<number | null>(null)
 
   // 倒计时
   useEffect(() => {
     if (!current) {
       setCountdown(null)
-      setEditMode(false)
       return
     }
 
-    setEditedArgs(current.toolArgs)
-
     if (current.timeoutMs > 0) {
+      // 只用相对 TTL 展示倒计时，避免桌面端和远程服务端时钟不同步。
       const seconds = Math.ceil(current.timeoutMs / 1000)
       setCountdown(seconds)
 
@@ -49,7 +45,7 @@ export function PermissionConfirmModal() {
           if (prev === null) return null
           if (prev <= 1) {
             // 超时自动拒绝
-            resolveConfirmation(current.confirmId, false)
+            void resolveConfirmation(current, false)
             return null
           }
           return prev - 1
@@ -67,28 +63,29 @@ export function PermissionConfirmModal() {
     if (!current) return
 
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !editMode) {
+      if (e.key === 'Enter' && !resolving && !error) {
         e.preventDefault()
         handleApprove()
-      } else if (e.key === 'Escape') {
+      } else if (e.key === 'Escape' && !resolving) {
         e.preventDefault()
-        handleDeny()
+        if (error) dismissCurrent()
+        else handleDeny()
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [current, editMode, editedArgs])
+  }, [current, resolving, error, dismissCurrent])
 
   if (!current) return null
 
   const risk = RISK_COLORS[current.riskLevel] || RISK_COLORS.CONFIRM
 
   const handleApprove = () => {
-    resolveConfirmation(current.confirmId, true, editMode ? editedArgs : undefined)
+    void resolveConfirmation(current, true)
   }
 
   const handleDeny = () => {
-    resolveConfirmation(current.confirmId, false)
+    void resolveConfirmation(current, false)
   }
 
   return (
@@ -145,45 +142,33 @@ export function PermissionConfirmModal() {
             ⚠️ {current.reason}
           </div>
 
-          {/* 参数 / 编辑区 */}
+          {error && (
+            <div
+              className="p-2.5 rounded text-xs"
+              style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', color: '#fca5a5' }}
+            >
+              {error}。该请求不会执行，可关闭此弹窗。
+            </div>
+          )}
+
+          {/* 参数只读展示：修改参数必须重新发起工具调用并重新评估权限 */}
           <div>
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs" style={{ color: colors.textSecondary || '#999' }}>执行参数</span>
-              <button
-                className="text-xs hover:underline"
-                style={{ color: colors.accent }}
-                onClick={() => setEditMode(!editMode)}
-              >
-                {editMode ? '取消编辑' : '编辑参数'}
-              </button>
+              <span className="text-[11px]" style={{ color: colors.textSecondary || '#777' }}>参数不可修改</span>
             </div>
-            {editMode ? (
-              <textarea
-                className="w-full rounded p-2 text-xs font-mono resize-y"
-                style={{
-                  backgroundColor: colors.bgInput || 'rgba(255,255,255,0.05)',
-                  color: colors.text,
-                  border: `1px solid ${colors.border || 'rgba(255,255,255,0.1)'}`,
-                  minHeight: '80px',
-                }}
-                value={editedArgs}
-                onChange={(e) => setEditedArgs(e.target.value)}
-                autoFocus
-              />
-            ) : (
-              <pre
-                className="p-2 rounded text-xs font-mono overflow-x-auto"
-                style={{
-                  backgroundColor: colors.bgInput || 'rgba(255,255,255,0.05)',
-                  color: colors.text,
-                  maxHeight: '160px',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                }}
-              >
-                {current.toolArgs}
-              </pre>
-            )}
+            <pre
+              className="p-2 rounded text-xs font-mono overflow-x-auto"
+              style={{
+                backgroundColor: colors.bgInput || 'rgba(255,255,255,0.05)',
+                color: colors.text,
+                maxHeight: '160px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+              }}
+            >
+              {current.toolArgs}
+            </pre>
           </div>
         </div>
 
@@ -199,20 +184,24 @@ export function PermissionConfirmModal() {
               color: colors.textSecondary || '#999',
               border: `1px solid ${colors.border || 'rgba(255,255,255,0.15)'}`,
             }}
-            onClick={handleDeny}
+            onClick={error ? dismissCurrent : handleDeny}
+            disabled={resolving}
           >
-            拒绝 (Esc)
+            {error ? '关闭 (Esc)' : resolving ? '处理中…' : '拒绝 (Esc)'}
           </button>
-          <button
-            className="px-3 py-1.5 rounded text-xs font-medium transition-colors"
-            style={{
-              backgroundColor: risk.border,
-              color: '#fff',
-            }}
-            onClick={handleApprove}
-          >
-            确认执行 (Enter)
-          </button>
+          {!error && (
+            <button
+              className="px-3 py-1.5 rounded text-xs font-medium transition-colors disabled:opacity-50"
+              style={{
+                backgroundColor: risk.border,
+                color: '#fff',
+              }}
+              onClick={handleApprove}
+              disabled={resolving}
+            >
+              {resolving ? '处理中…' : '确认执行 (Enter)'}
+            </button>
+          )}
         </div>
       </div>
     </div>

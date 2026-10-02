@@ -10,7 +10,11 @@ use std::path::PathBuf;
 
 /// CLI 命令行参数
 #[derive(Parser, Debug)]
-#[command(name = "walicode", version, about = "WaLiCode — AI 驱动的终端智能运维助手")]
+#[command(
+    name = "walicode",
+    version,
+    about = "WaLiCode — AI 驱动的终端智能运维助手"
+)]
 pub struct CliArgs {
     /// 服务端地址（默认 http://localhost:8091）
     #[arg(long, default_value = "http://localhost:8091")]
@@ -21,7 +25,7 @@ pub struct CliArgs {
     pub agent_id: String,
 
     /// 用户 ID
-    #[arg(long, default_value = "cli-user")]
+    #[arg(long, default_value = "default")]
     pub user_id: String,
 
     /// 一条一次性消息（执行完毕后退出，非交互模式）
@@ -66,6 +70,32 @@ pub struct ReActEvent {
     pub step_info: Option<StepInfo>,
     #[serde(rename = "changeSummary", default)]
     pub change_summary: Option<ChangeSummary>,
+    #[serde(default)]
+    pub permission: Option<PermissionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionInfo {
+    pub ticket: String,
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    #[serde(rename = "runId")]
+    pub run_id: String,
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    #[serde(rename = "toolName")]
+    pub tool_name: String,
+    #[serde(rename = "toolArgs")]
+    pub tool_args: String,
+    #[serde(rename = "argsDigest")]
+    pub args_digest: String,
+    #[serde(rename = "riskLevel")]
+    pub risk_level: String,
+    pub reason: String,
+    #[serde(rename = "timeoutMs")]
+    pub timeout_ms: u64,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +177,7 @@ pub enum ToolStatus {
 #[derive(Debug)]
 pub enum AppEvent {
     /// SSE 事件到达
-    SseEvent(ReActEvent),
+    SseEvent(Box<ReActEvent>),
     /// 用户发送消息
     #[allow(dead_code)]
     UserInput(String),
@@ -174,8 +204,9 @@ pub struct InputHistory {
 impl InputHistory {
     pub fn new(max_entries: usize) -> Self {
         let history_file = Self::get_history_path();
-        let entries = history_file.as_ref()
-            .and_then(|path| Self::load_from_file(path))
+        let entries = history_file
+            .as_ref()
+            .and_then(Self::load_from_file)
             .unwrap_or_default();
 
         Self {
@@ -322,7 +353,9 @@ impl App {
     pub fn new(args: &CliArgs) -> Self {
         // 推断工作目录
         let workdir = args.workdir.clone().or_else(|| {
-            std::env::current_dir().ok().map(|p| p.to_string_lossy().to_string())
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().to_string())
         });
 
         Self {
@@ -359,7 +392,10 @@ impl App {
         if self.input_lines.is_empty() {
             self.input_lines.push(String::new());
         }
-        self.cursor_pos = (self.input_lines.len() - 1, self.input_lines.last().unwrap().len());
+        self.cursor_pos = (
+            self.input_lines.len() - 1,
+            self.input_lines.last().unwrap().len(),
+        );
     }
 
     /// 清空输入
@@ -373,7 +409,11 @@ impl App {
         let (line, col) = self.cursor_pos;
         if line < self.input_lines.len() {
             let text = &self.input_lines[line];
-            let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
+            let byte_pos = text
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
             self.input_lines[line].insert(byte_pos, c);
             self.cursor_pos.1 += 1;
         }
@@ -385,8 +425,16 @@ impl App {
         if col > 0 {
             // 行内删除：找到字符边界
             let text = &self.input_lines[line];
-            let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
-            let prev_byte_pos = text.char_indices().nth(col - 1).map(|(i, _)| i).unwrap_or(0);
+            let byte_pos = text
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            let prev_byte_pos = text
+                .char_indices()
+                .nth(col - 1)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
             self.input_lines[line].replace_range(prev_byte_pos..byte_pos, "");
             self.cursor_pos.1 -= 1;
             true
@@ -410,8 +458,16 @@ impl App {
             let char_count = text.chars().count();
             if col < char_count {
                 // 行内删除：找到字符边界
-                let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
-                let next_byte_pos = text.char_indices().nth(col + 1).map(|(i, _)| i).unwrap_or(text.len());
+                let byte_pos = text
+                    .char_indices()
+                    .nth(col)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
+                let next_byte_pos = text
+                    .char_indices()
+                    .nth(col + 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
                 self.input_lines[line].replace_range(byte_pos..next_byte_pos, "");
             } else if line + 1 < self.input_lines.len() {
                 // 跨行合并：下一行内容附加到当前行末尾
@@ -426,7 +482,11 @@ impl App {
         let (line, col) = self.cursor_pos;
         if line < self.input_lines.len() {
             let text = &self.input_lines[line];
-            let byte_pos = text.char_indices().nth(col).map(|(i, _)| i).unwrap_or(text.len());
+            let byte_pos = text
+                .char_indices()
+                .nth(col)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
             let after = self.input_lines[line].split_off(byte_pos);
             self.input_lines.insert(line + 1, after);
             self.cursor_pos = (line + 1, 0);
@@ -502,12 +562,10 @@ impl App {
                 }
 
                 // 更新或创建 Assistant 消息
-                if let Some(last) = self.messages.last_mut() {
-                    if let Message::Assistant { text, done } = last {
-                        if !*done {
-                            *text = full_text;
-                            return;
-                        }
+                if let Some(Message::Assistant { text, done }) = self.messages.last_mut() {
+                    if !*done {
+                        *text = full_text;
+                        return;
                     }
                 }
                 // 新建 Assistant 消息
@@ -572,10 +630,8 @@ impl App {
 
             "done" => {
                 // 标记 Assistant 消息完成
-                if let Some(last) = self.messages.last_mut() {
-                    if let Message::Assistant { text: _, done } = last {
-                        *done = true;
-                    }
+                if let Some(Message::Assistant { done, .. }) = self.messages.last_mut() {
+                    *done = true;
                 }
                 self.is_streaming = false;
                 self.streaming_text.clear();
@@ -597,7 +653,20 @@ impl App {
 
             "warning" => {
                 if let Some(w) = event.content {
-                    self.messages.push(Message::System { text: format!("⚠️ {}", w) });
+                    self.messages.push(Message::System {
+                        text: format!("⚠️ {}", w),
+                    });
+                }
+            }
+
+            "permission_confirm" => {
+                if let Some(permission) = event.permission {
+                    self.messages.push(Message::System {
+                        text: format!(
+                            "🔐 工具 {} 需要确认（会话 {}）：{}",
+                            permission.tool_name, permission.session_id, permission.reason
+                        ),
+                    });
                 }
             }
 
@@ -629,7 +698,12 @@ impl App {
     fn find_tool_name(&self, tool_call_id: &str) -> String {
         // 从 messages 中反向查找
         for msg in self.messages.iter().rev() {
-            if let Message::ToolCall { tool_name, tool_call_id: id, .. } = msg {
+            if let Message::ToolCall {
+                tool_name,
+                tool_call_id: id,
+                ..
+            } = msg
+            {
                 if id == tool_call_id {
                     return tool_name.clone();
                 }

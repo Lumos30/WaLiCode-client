@@ -1,6 +1,6 @@
 import { memo, useState, useMemo, useCallback } from 'react'
 import { useThemeStore } from '../stores/themeStore'
-import { useAiPatchStore, type AiPatchPreview } from '../stores/aiPatchStore'
+import { canSafelyRevertAiPatch, useAiPatchStore, type AiPatchPreview } from '../stores/aiPatchStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { InlineDiff } from './InlineDiff'
@@ -75,6 +75,7 @@ export const ArtifactCard = memo(function ArtifactCard({
   const changeKind = getChangeKindLabel(added, removed)
   const fileIcon = getFileIcon(preview.path)
   const isRemote = preview.target === 'remote'
+  const canRevert = canSafelyRevertAiPatch(preview)
 
   // Accept：保留当前内容，清除预览
   const handleAccept = useCallback(() => {
@@ -85,26 +86,30 @@ export const ArtifactCard = memo(function ArtifactCard({
 
   // Revert：恢复原始内容
   const handleRevert = useCallback(async () => {
+    if (!canRevert) return
     setReverting(true)
     try {
       const localStore = useLocalFileStore.getState()
       const remoteStore = useFileExplorerStore.getState()
 
+      let restored = false
       if (preview.target === 'local') {
-        await localStore.restoreFileContent(preview.path, preview.beforeContent)
+        restored = await localStore.restoreFileContent(preview.path, preview.beforeContent)
       } else if (preview.target === 'remote' && preview.connectionId) {
-        await remoteStore.restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
+        restored = await remoteStore.restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
       }
 
-      removePreview(preview.id)
-      setStatus('reverted')
-      onStatusChange?.('reverted')
+      if (restored) {
+        removePreview(preview.id)
+        setStatus('reverted')
+        onStatusChange?.('reverted')
+      }
     } catch (e) {
       console.error('[ArtifactCard] Revert 失败:', e)
     } finally {
       setReverting(false)
     }
-  }, [preview, removePreview, onStatusChange])
+  }, [preview, canRevert, removePreview, onStatusChange])
 
   // ===== 已接受态 =====
   if (status === 'accepted') {
@@ -248,6 +253,11 @@ export const ArtifactCard = memo(function ArtifactCard({
 
           {/* Diff 内容 */}
           <div className="px-2 py-2">
+            {!canRevert && (
+              <p className="px-1 pb-2 text-[10px]" style={{ color: '#f59e0b' }}>
+                修改前内容未捕获，此 Diff 仅供查看，不能安全回退。
+              </p>
+            )}
             <InlineDiff
               beforeContent={preview.beforeContent}
               afterContent={preview.afterContent}
@@ -266,7 +276,7 @@ export const ArtifactCard = memo(function ArtifactCard({
             <div className="flex items-center gap-2">
               <button
                 onClick={(e) => { e.stopPropagation(); handleRevert() }}
-                disabled={reverting}
+                disabled={reverting || !canRevert}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all hover:opacity-80 disabled:opacity-50"
                 style={{
                   backgroundColor: 'rgba(239,68,68,0.10)',
@@ -284,7 +294,7 @@ export const ArtifactCard = memo(function ArtifactCard({
                     <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
                   </svg>
                 )}
-                Revert
+                {canRevert ? 'Revert' : '无法安全回退'}
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); handleAccept() }}

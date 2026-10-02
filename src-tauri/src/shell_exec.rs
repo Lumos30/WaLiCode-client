@@ -1,19 +1,22 @@
 //! Shell Execution Module for WaLiCode
 //! Provides safe shell command execution with platform-specific handling
 
-use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use std::io::Read;
 #[cfg(windows)]
 use encoding_rs::GBK;
 #[cfg(windows)]
 use encoding_rs_io::DecodeReaderBytesBuilder;
+use serde::{Deserialize, Serialize};
+use std::io::Read;
 
 /// Decode bytes to String with platform-aware encoding.
-/// On Windows, tries GBK first (common for cmd/PowerShell), falls back to UTF-8 lossy.
+/// On Windows, preserves valid UTF-8 first, then falls back to legacy GBK output.
 /// On other platforms, uses UTF-8 lossy directly.
 #[cfg(windows)]
 fn decode_output_bytes(buf: &[u8]) -> String {
+    if let Ok(utf8) = String::from_utf8(buf.to_vec()) {
+        return utf8;
+    }
+
     let mut decoder = DecodeReaderBytesBuilder::new()
         .encoding(Some(GBK))
         .build(buf);
@@ -36,21 +39,19 @@ fn get_user_shell() -> String {
     {
         // Android: /system/bin/sh is always available
         // iOS: App Sandbox 内无用户 shell，使用 /bin/sh
-        std::env::var("SHELL")
-            .unwrap_or_else(|_| "/bin/sh".to_string())
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         #[cfg(not(windows))]
         {
-            std::env::var("SHELL")
-                .unwrap_or_else(|_| {
-                    if cfg!(target_os = "macos") {
-                        "/bin/zsh".to_string()
-                    } else {
-                        "/bin/bash".to_string()
-                    }
-                })
+            std::env::var("SHELL").unwrap_or_else(|_| {
+                if cfg!(target_os = "macos") {
+                    "/bin/zsh".to_string()
+                } else {
+                    "/bin/bash".to_string()
+                }
+            })
         }
         #[cfg(windows)]
         {
@@ -58,12 +59,12 @@ fn get_user_shell() -> String {
         }
     }
 }
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::sync::Mutex;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::Emitter;
 
@@ -73,10 +74,16 @@ use tauri::Emitter;
 /// - macOS/Linux: `-lic` (login + interactive + command)
 fn get_shell_arg() -> &'static str {
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    { "-c" }
+    {
+        "-c"
+    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        if cfg!(target_os = "windows") { "/C" } else { "-lic" }
+        if cfg!(target_os = "windows") {
+            "/C"
+        } else {
+            "-lic"
+        }
     }
 }
 
@@ -85,6 +92,12 @@ fn get_shell_arg() -> &'static str {
 // Used for Ctrl+C support: kill a running process by session ID.
 lazy_static::lazy_static! {
     pub static ref STREAMING_PROCESSES: Mutex<HashMap<String, u32>> = Mutex::new(HashMap::new());
+    // Non-streaming commands retain their Child handle as a restricted-host
+    // fallback when Windows denies `taskkill` for a process we started.
+    static ref TRACKED_CHILDREN: Mutex<HashMap<String, std::sync::Arc<Mutex<std::process::Child>>>> = Mutex::new(HashMap::new());
+    // A direct-child fallback cannot guarantee that descendants closed their
+    // inherited stdout/stderr handles, so do not block cancellation on readers.
+    static ref FALLBACK_TERMINATED_SESSIONS: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamEvent {
@@ -117,6 +130,8 @@ pub struct ShellResult {
     pub backgrounded: bool,
     /// The final command that was executed (may differ from input if backgrounded)
     pub executed_command: String,
+    /// Whether the command exceeded its requested timeout and was terminated.
+    pub timed_out: bool,
 }
 
 /// Detect if a command is a "persistent server" that will never exit on its own.
@@ -136,87 +151,87 @@ fn is_persistent_server(command: &str) -> bool {
     let patterns = [
         // Python HTTP servers
         ("python3 -m http.server", "python3 -m http.server"),
-        ("python -m http.server",   "python -m http.server"),
+        ("python -m http.server", "python -m http.server"),
         ("python3 -m SimpleHTTPServer", "python3 -m SimpleHTTPServer"),
-        ("python -m SimpleHTTPServer",  "python -m SimpleHTTPServer"),
+        ("python -m SimpleHTTPServer", "python -m SimpleHTTPServer"),
         // Python dev servers
         ("python3 manage.py runserver", "python3 manage.py runserver"),
-        ("python manage.py runserver",  "python manage.py runserver"),
-        ("flask run",              "flask run"),
-        ("fastapi dev",            "fastapi dev"),
-        ("uvicorn ",              "uvicorn "),
+        ("python manage.py runserver", "python manage.py runserver"),
+        ("flask run", "flask run"),
+        ("fastapi dev", "fastapi dev"),
+        ("uvicorn ", "uvicorn "),
         ("django-admin runserver", "django-admin runserver"),
         // Node HTTP servers
-        ("npx serve",             "npx serve"),
-        ("npx http-server",       "npx http-server"),
-        ("npx http2",             "npx http2"),
-        ("http-server",           "http-server"),
-        ("serve -s",              "serve -s"),
+        ("npx serve", "npx serve"),
+        ("npx http-server", "npx http-server"),
+        ("npx http2", "npx http2"),
+        ("http-server", "http-server"),
+        ("serve -s", "serve -s"),
         // Node dev servers
-        ("vite",                  "vite"),
-        ("next dev",              "next dev"),
-        ("next start",            "next start"),
-        ("next build",            "next build"),
-        ("nuxt dev",              "nuxt dev"),
-        ("nuxt start",            "nuxt start"),
-        ("nuxt build",            "nuxt build"),
-        ("webpack serve",         "webpack serve"),
-        ("webpack-dev-server",    "webpack-dev-server"),
-        ("rollup -c -w",          "rollup -c -w"),
-        ("esbuild --serve",       "esbuild --serve"),
+        ("vite", "vite"),
+        ("next dev", "next dev"),
+        ("next start", "next start"),
+        ("next build", "next build"),
+        ("nuxt dev", "nuxt dev"),
+        ("nuxt start", "nuxt start"),
+        ("nuxt build", "nuxt build"),
+        ("webpack serve", "webpack serve"),
+        ("webpack-dev-server", "webpack-dev-server"),
+        ("rollup -c -w", "rollup -c -w"),
+        ("esbuild --serve", "esbuild --serve"),
         // Bun dev
-        ("bun --bun dev",         "bun --bun dev"),
-        ("bun dev",               "bun dev"),
-        ("bun run dev",           "bun run dev"),
+        ("bun --bun dev", "bun --bun dev"),
+        ("bun dev", "bun dev"),
+        ("bun run dev", "bun run dev"),
         // Go dev servers
-        ("air",                   "air"),
-        ("fresh",                 "fresh"),
-        ("realize start",         "realize start"),
+        ("air", "air"),
+        ("fresh", "fresh"),
+        ("realize start", "realize start"),
         // Rust dev servers
-        ("cargo run --watch",     "cargo run --watch"),
+        ("cargo run --watch", "cargo run --watch"),
         // Docker
-        ("docker run",            "docker run"),
-        ("docker-compose up",     "docker-compose up"),
-        ("docker compose up",     "docker compose up"),
+        ("docker run", "docker run"),
+        ("docker-compose up", "docker-compose up"),
+        ("docker compose up", "docker compose up"),
         // Misc servers
-        ("redis-server",          "redis-server"),
-        ("mongod",                "mongod"),
-        ("postgres -D",           "postgres -D"),
-        ("nginx",                 "nginx"),
+        ("redis-server", "redis-server"),
+        ("mongod", "mongod"),
+        ("postgres -D", "postgres -D"),
+        ("nginx", "nginx"),
         // Watch/maintainer loops
-        ("nodemon",               "nodemon"),
-        ("node-dev",              "node-dev"),
-        ("ts-node-dev",           "ts-node-dev"),
-        ("concurrently",          "concurrently"),
-        ("live-server",           "live-server"),
-        ("browser-sync start",    "browser-sync start"),
-        ("parcel watch",          "parcel watch"),
-        ("snowpack dev",          "snowpack dev"),
+        ("nodemon", "nodemon"),
+        ("node-dev", "node-dev"),
+        ("ts-node-dev", "ts-node-dev"),
+        ("concurrently", "concurrently"),
+        ("live-server", "live-server"),
+        ("browser-sync start", "browser-sync start"),
+        ("parcel watch", "parcel watch"),
+        ("snowpack dev", "snowpack dev"),
         // Interactive commands that would block forever
-        ("top",                   "top"),
-        ("htop",                  "htop"),
-        ("vmstat",                "vmstat"),
-        ("iostat",                "iostat"),
-        ("watch ",                "watch "),
-        ("tail -f",               "tail -f"),
-        ("tail --follow",         "tail --follow"),
+        ("top", "top"),
+        ("htop", "htop"),
+        ("vmstat", "vmstat"),
+        ("iostat", "iostat"),
+        ("watch ", "watch "),
+        ("tail -f", "tail -f"),
+        ("tail --follow", "tail --follow"),
         // Shell REPLs
-        ("python3",               "python3"),
-        ("python",                "python"),
-        ("node -i",               "node -i"),
-        ("node --interactive",    "node --interactive"),
-        ("ruby -i",               "ruby -i"),
-        ("lua",                   "lua"),
-        ("perl -de",              "perl -de"),
-        ("php -a",                "php -a"),
-        ("bash -i",               "bash -i"),
-        ("zsh -i",                "zsh -i"),
+        ("python3", "python3"),
+        ("python", "python"),
+        ("node -i", "node -i"),
+        ("node --interactive", "node --interactive"),
+        ("ruby -i", "ruby -i"),
+        ("lua", "lua"),
+        ("perl -de", "perl -de"),
+        ("php -a", "php -a"),
+        ("bash -i", "bash -i"),
+        ("zsh -i", "zsh -i"),
         // Interactive network tools
-        ("telnet",                "telnet"),
-        ("ftp",                   "ftp"),
-        ("nc -l",                 "nc -l"),
-        ("nc -lvnp",              "nc -lvnp"),
-        ("socat -",               "socat -"),
+        ("telnet", "telnet"),
+        ("ftp", "ftp"),
+        ("nc -l", "nc -l"),
+        ("nc -lvnp", "nc -lvnp"),
+        ("socat -", "socat -"),
     ];
 
     for (prefix, _display) in &patterns {
@@ -228,11 +243,19 @@ fn is_persistent_server(command: &str) -> bool {
     // ─── Heuristics: watch / serve / dev flags ───────────────────
     // Only for package managers that run dev servers
     let dev_prefixes = [
-        "npm run dev", "npm run serve", "npm run start",
-        "pnpm run dev", "pnpm run serve", "pnpm run start",
-        "yarn dev", "yarn serve", "yarn start",
-        "bun run dev", "bun run serve",
-        "deno task dev", "deno task serve",
+        "npm run dev",
+        "npm run serve",
+        "npm run start",
+        "pnpm run dev",
+        "pnpm run serve",
+        "pnpm run start",
+        "yarn dev",
+        "yarn serve",
+        "yarn start",
+        "bun run dev",
+        "bun run serve",
+        "deno task dev",
+        "deno task serve",
     ];
     for prefix in &dev_prefixes {
         if cmd_trimmed.starts_with(prefix) {
@@ -255,17 +278,25 @@ fn is_persistent_server(command: &str) -> bool {
 /// Wrap a command for background execution.
 /// Uses `setsid` so the process is fully detached and survives shell exit.
 fn wrap_background_command(command: &str) -> String {
-    format!("setsid {} >/dev/null 2>&1 &", command.trim_end_matches('&').trim())
+    format!(
+        "setsid {} >/dev/null 2>&1 &",
+        command.trim_end_matches('&').trim()
+    )
 }
 
-/// Execute a shell command with proper platform handling
-pub fn execute_shell_internal(
+/// Execute a shell command with one shared lifecycle for GUI and CLI callers.
+///
+/// A session ID makes the process cancellable through `kill_stream_shell`; every
+/// non-background command is also terminated when its timeout expires.
+pub fn execute_shell_with_lifecycle(
     command: &str,
     cwd: Option<&str>,
     timeout_ms: u64,
     auto_background: bool,
+    session_id: Option<&str>,
 ) -> Result<ShellResult, String> {
     let start = Instant::now();
+    validate_command(command)?;
 
     // Check if this is a persistent server that needs backgrounding
     let is_persistent = auto_background && is_persistent_server(command);
@@ -285,9 +316,6 @@ pub fn execute_shell_internal(
         } else {
             format!("nohup {} >/dev/null 2>&1 &", clean_cmd)
         };
-
-        // Validate the original command (not the nohup wrapper)
-        validate_command(&clean_cmd)?;
 
         let shell_path = get_user_shell();
         let shell_arg = get_shell_arg();
@@ -320,6 +348,7 @@ pub fn execute_shell_internal(
                     duration_ms: start.elapsed().as_millis() as u64,
                     backgrounded: true,
                     executed_command: clean_cmd,
+                    timed_out: false,
                 });
             }
             Err(e) => {
@@ -328,72 +357,173 @@ pub fn execute_shell_internal(
         }
     }
 
-    // Non-persistent: run in a thread with timeout. If the command doesn't
-    // finish within timeout_ms, return an error immediately so the UI never blocks.
-    use std::sync::mpsc;
-    use std::thread;
+    let shell_path = get_user_shell();
+    let shell_arg = get_shell_arg();
+    let mut cmd = Command::new(&shell_path);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    cmd.arg(shell_arg)
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
 
-    let (tx, rx) = mpsc::channel();
-
-    // Clone data needed inside the thread to avoid lifetime issues
-    let cmd_str = command.to_string();
-    let cwd_str = cwd.map(|s| s.to_string());
-
-    let _join_handle = thread::spawn(move || {
-        let shell_path = get_user_shell();
-        let shell_arg = get_shell_arg();
-
-        let mut cmd = Command::new(&shell_path);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        cmd.arg(shell_arg)
-            .arg(&cmd_str)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(ref dir) = cwd_str {
-            let path = std::path::Path::new(dir);
-            if path.exists() && path.is_dir() {
-                cmd.current_dir(path);
-            }
+    if let Some(dir) = cwd {
+        let path = std::path::Path::new(dir);
+        if path.exists() && path.is_dir() {
+            cmd.current_dir(path);
         }
+    }
 
-        match cmd.output() {
-            Ok(o) => {
-                let stdout = decode_output_bytes(&o.stdout);
-                let stderr = filter_shell_noise(&decode_output_bytes(&o.stderr));
-                let exit_code = o.status.code().unwrap_or(-1);
-                tx.send(Ok((stdout, stderr, exit_code))).ok();
-            }
-            Err(e) => {
-                tx.send(Err(format!("Failed to execute command: {}", e))).ok();
-            }
-        }
+    let child = std::sync::Arc::new(Mutex::new(
+        cmd.spawn()
+            .map_err(|e| format!("Failed to spawn command: {}", e))?,
+    ));
+    let pid = child
+        .lock()
+        .map_err(|_| "Command process lock poisoned".to_string())?
+        .id();
+    if let Some(sid) = session_id {
+        STREAMING_PROCESSES
+            .lock()
+            .map_err(|_| "Process registry lock poisoned".to_string())?
+            .insert(sid.to_string(), pid);
+        TRACKED_CHILDREN
+            .lock()
+            .map_err(|_| "Process registry lock poisoned".to_string())?
+            .insert(sid.to_string(), child.clone());
+    }
+
+    let stdout = child
+        .lock()
+        .map_err(|_| "Command process lock poisoned".to_string())?
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to read command stdout".to_string())?;
+    let stderr = child
+        .lock()
+        .map_err(|_| "Command process lock poisoned".to_string())?
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to read command stderr".to_string())?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut reader = stdout;
+        let _ = reader.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut reader = stderr;
+        let _ = reader.read_to_end(&mut bytes);
+        bytes
     });
 
-    let (stdout, stderr, exit_code) = match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms.max(5000))) {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => return Err(e),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            return Err(format!(
-                "Command timed out after {}ms (killed). If you need more time, increase timeout.",
-                timeout_ms.max(5000)
-            ));
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            return Err("Command thread terminated unexpectedly".to_string());
+    let timeout = std::time::Duration::from_millis(timeout_ms.max(1));
+    let mut timed_out = false;
+    let mut output_pipes_may_remain_open = false;
+    let status = loop {
+        // Keep the mutex guard out of the match arms: a timeout arm must be
+        // able to lock the child again to kill/wait it without self-deadlocking.
+        let current_status = {
+            let mut child_guard = child
+                .lock()
+                .map_err(|_| "Command process lock poisoned".to_string())?;
+            child_guard
+                .try_wait()
+                .map_err(|e| format!("Failed to wait for command: {}", e))?
+        };
+        match current_status {
+            Some(status) => break status,
+            None if start.elapsed() >= timeout => {
+                timed_out = true;
+                // `taskkill /T` is the normal Windows path and removes the whole
+                // command tree.  Some restricted test hosts deny taskkill even for
+                // a child we own, so retain a direct-child fallback instead of
+                // reporting a timeout while leaving the shell running.
+                if let Err(tree_error) = kill_process_by_pid(pid) {
+                    {
+                        let mut child_guard = child
+                            .lock()
+                            .map_err(|_| "Command process lock poisoned".to_string())?;
+                        match child_guard.kill() {
+                            Ok(()) => {}
+                            Err(kill_error) => match child_guard.try_wait() {
+                                Ok(Some(_)) => {}
+                                Ok(None) => return Err(format!(
+                                    "Failed to terminate timed out command: {}; fallback failed: {}",
+                                    tree_error, kill_error
+                                )),
+                                Err(wait_error) => return Err(format!(
+                                    "Failed to terminate timed out command: {}; fallback failed: {}; status check failed: {}",
+                                    tree_error, kill_error, wait_error
+                                )),
+                            },
+                        }
+                    }
+                    output_pipes_may_remain_open = true;
+                }
+                break child
+                    .lock()
+                    .map_err(|_| "Command process lock poisoned".to_string())?
+                    .wait()
+                    .map_err(|e| format!("Failed to wait for terminated command: {}", e))?;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
         }
     };
+
+    if let Some(sid) = session_id {
+        let mut processes = STREAMING_PROCESSES
+            .lock()
+            .map_err(|_| "Process registry lock poisoned".to_string())?;
+        if processes.get(sid).copied() == Some(pid) {
+            processes.remove(sid);
+        }
+        TRACKED_CHILDREN
+            .lock()
+            .map_err(|_| "Process registry lock poisoned".to_string())?
+            .remove(sid);
+        output_pipes_may_remain_open |= FALLBACK_TERMINATED_SESSIONS
+            .lock()
+            .map_err(|_| "Process registry lock poisoned".to_string())?
+            .remove(sid);
+    }
+
+    let stdout = if output_pipes_may_remain_open {
+        String::new()
+    } else {
+        decode_output_bytes(&stdout_reader.join().unwrap_or_default())
+    };
+    let stderr = if output_pipes_may_remain_open {
+        String::new()
+    } else {
+        filter_shell_noise(&decode_output_bytes(
+            &stderr_reader.join().unwrap_or_default(),
+        ))
+    };
+    let exit_code = status.code().unwrap_or(-1);
 
     Ok(ShellResult {
         stdout,
         stderr,
         exit_code,
-        success: exit_code == 0,
+        success: !timed_out && exit_code == 0,
         duration_ms: start.elapsed().as_millis() as u64,
         backgrounded: false,
         executed_command: command.to_string(),
+        timed_out,
     })
+}
+
+/// Backward-compatible name for internal local callers without a cancellation key.
+pub fn execute_shell_internal(
+    command: &str,
+    cwd: Option<&str>,
+    timeout_ms: u64,
+    auto_background: bool,
+) -> Result<ShellResult, String> {
+    execute_shell_with_lifecycle(command, cwd, timeout_ms, auto_background, None)
 }
 
 /// Filter shell initialization noise from stderr.
@@ -445,31 +575,28 @@ fn validate_command(command: &str) -> Result<(), String> {
         // Network attacks (basic)
         // Note: We allow wget/curl for development convenience
     ];
-    
+
     let cmd_lower = command.to_lowercase();
     for pattern in dangerous_patterns {
         if cmd_lower.contains(&pattern.to_lowercase()) {
             return Err(format!("Command contains dangerous pattern: {}", pattern));
         }
     }
-    
+
     // Check for null bytes (injection attempt)
     if command.contains('\0') {
         return Err("Command contains null byte (possible injection)".to_string());
     }
-    
+
     Ok(())
 }
 
 #[allow(dead_code)]
 /// Execute command with streaming support (returns spawn handle for real-time output)
 #[cfg(not(target_os = "windows"))]
-pub fn spawn_shell(
-    command: &str,
-    cwd: Option<&str>,
-) -> Result<std::process::Child, String> {
+pub fn spawn_shell(command: &str, cwd: Option<&str>) -> Result<std::process::Child, String> {
     validate_command(command)?;
-    
+
     let shell = get_user_shell();
     let mut cmd = Command::new(&shell);
     // Android / iOS: /bin/sh only supports -c, not -lic
@@ -480,25 +607,22 @@ pub fn spawn_shell(
     cmd.arg(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    
+
     if let Some(dir) = cwd {
         let path = std::path::Path::new(dir);
         if path.exists() && path.is_dir() {
             cmd.current_dir(path);
         }
     }
-    
+
     cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))
 }
 
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
-pub fn spawn_shell(
-    command: &str,
-    cwd: Option<&str>,
-) -> Result<std::process::Child, String> {
+pub fn spawn_shell(command: &str, cwd: Option<&str>) -> Result<std::process::Child, String> {
     validate_command(command)?;
-    
+
     let mut cmd = Command::new("cmd.exe");
     #[cfg(windows)]
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -506,21 +630,25 @@ pub fn spawn_shell(
         .arg(command)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    
+
     if let Some(dir) = cwd {
         let path = std::path::Path::new(dir);
         if path.exists() && path.is_dir() {
             cmd.current_dir(path);
         }
     }
-    
+
     cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))
 }
 
 /// Platform-specific shell information
 pub fn get_shell_info() -> serde_json::Value {
     let hostname = std::env::var("HOSTNAME")
-        .or_else(|_| std::process::Command::new("hostname").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()))
+        .or_else(|_| {
+            std::process::Command::new("hostname")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
         .unwrap_or_else(|_| "localhost".to_string());
 
     #[cfg(target_os = "android")]
@@ -606,7 +734,8 @@ pub async fn execute_shell_cmd(
             timeout_ms.unwrap_or(30000),
             auto_background.unwrap_or(false),
             sid,
-        ).await;
+        )
+        .await;
     }
 
     tokio::task::spawn_blocking(move || {
@@ -622,7 +751,7 @@ pub async fn execute_shell_cmd(
 }
 
 /// Execute a shell command with PID tracking, so it can be killed via `kill_stream_shell`.
-/// This is the abort-aware version of `execute_shell_internal`.
+/// This delegates to the same lifecycle core used by every non-streaming caller.
 pub async fn execute_shell_with_tracking(
     command: &str,
     cwd: Option<&str>,
@@ -630,140 +759,19 @@ pub async fn execute_shell_with_tracking(
     auto_background: bool,
     session_id: String,
 ) -> Result<ShellResult, String> {
-    use std::sync::mpsc;
-    use std::thread;
-
-    // Persistent server backgrounding — same as execute_shell_internal
-    let is_persistent = auto_background && is_persistent_server(command);
-    if is_persistent {
-        let clean_cmd = command.trim_end().trim_end_matches('&').trim().to_string();
-        let nohup_cmd = if cfg!(target_os = "windows") {
-            format!("start /B {}", clean_cmd)
-        } else if cfg!(any(target_os = "android", target_os = "ios")) {
-            // Android (Toybox) / iOS: simple background, no nohup
-            format!("{} >/dev/null 2>&1 &", clean_cmd)
-        } else {
-            format!("nohup {} >/dev/null 2>&1 &", clean_cmd)
-        };
-        validate_command(&clean_cmd)?;
-        let shell_path = get_user_shell();
-        let shell_arg = get_shell_arg();
-        let mut cmd = Command::new(&shell_path);
-        #[cfg(windows)]
-        cmd.creation_flags(0x08000000);
-        cmd.arg(shell_arg)
-            .arg(&nohup_cmd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if let Some(dir) = cwd {
-            let path = std::path::Path::new(dir);
-            if path.exists() && path.is_dir() {
-                cmd.current_dir(path);
-            }
-        }
-        match cmd.spawn() {
-            Ok(_child) => Ok(ShellResult {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 0,
-                success: true,
-                duration_ms: 0,
-                backgrounded: true,
-                executed_command: clean_cmd,
-            }),
-            Err(e) => Err(format!("Failed to spawn command: {}", e)),
-        }
-    } else {
-        // Non-persistent: spawn child process, register PID for kill support, wait with timeout
-        let (pid_tx, pid_rx) = mpsc::channel::<u32>();
-        let (result_tx, result_rx) = mpsc::channel::<Result<(String, String, i32), String>>();
-        let cmd_str = command.to_string();
-        let cwd_str = cwd.map(|s| s.to_string());
-
-        let _join_handle = thread::spawn(move || {
-            let shell_path = get_user_shell();
-            let shell_arg = get_shell_arg();
-            let mut cmd = Command::new(&shell_path);
-            #[cfg(windows)]
-            cmd.creation_flags(0x08000000);
-            cmd.arg(shell_arg)
-                .arg(&cmd_str)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            if let Some(ref dir) = cwd_str {
-                let path = std::path::Path::new(dir);
-                if path.exists() && path.is_dir() {
-                    cmd.current_dir(path);
-                }
-            }
-
-            match cmd.spawn() {
-                Ok(child) => {
-                    let pid = child.id();
-                    let _ = pid_tx.send(pid);
-                    match child.wait_with_output() {
-                        Ok(o) => {
-                            let stdout = decode_output_bytes(&o.stdout);
-                            let stderr = filter_shell_noise(&decode_output_bytes(&o.stderr));
-                            let exit_code = o.status.code().unwrap_or(-1);
-                            result_tx.send(Ok((stdout, stderr, exit_code))).ok();
-                        }
-                        Err(e) => {
-                            result_tx.send(Err(format!("Failed to wait for output: {}", e))).ok();
-                        }
-                    }
-                }
-                Err(e) => {
-                    result_tx.send(Err(format!("Failed to spawn: {}", e))).ok();
-                }
-            }
-        });
-
-        // Receive the PID from the spawned thread and register it
-        let pid = pid_rx.recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(|_| "Failed to get process PID".to_string())?;
-        {
-            let mut procs = STREAMING_PROCESSES.lock().unwrap();
-            procs.insert(session_id.clone(), pid);
-        }
-
-        let start = std::time::Instant::now();
-        let timeout_dur = std::time::Duration::from_millis(timeout_ms.max(5000));
-
-        // Wait for result with timeout
-        let result = match result_rx.recv_timeout(timeout_dur) {
-            Ok(Ok((stdout, stderr, exit_code))) => Ok(ShellResult {
-                stdout,
-                stderr,
-                exit_code,
-                success: exit_code == 0,
-                duration_ms: start.elapsed().as_millis() as u64,
-                backgrounded: false,
-                executed_command: command.to_string(),
-            }),
-            Ok(Err(e)) => Err(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Timeout — kill the process
-                let _ = kill_process_by_pid(pid);
-                Err(format!(
-                    "Command timed out after {}ms (killed). If you need more time, increase timeout.",
-                    timeout_ms.max(5000)
-                ))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("Command thread terminated unexpectedly".to_string())
-            }
-        };
-
-        // Clean up PID registration
-        {
-            let mut procs = STREAMING_PROCESSES.lock().unwrap();
-            procs.remove(&session_id);
-        }
-
-        result
-    }
+    let command = command.to_string();
+    let cwd = cwd.map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        execute_shell_with_lifecycle(
+            &command,
+            cwd.as_deref(),
+            timeout_ms,
+            auto_background,
+            Some(&session_id),
+        )
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
 }
 
 /// Kill a process by PID (used for timeout cleanup)
@@ -779,18 +787,44 @@ fn kill_process_by_pid(pid: u32) -> Result<(), String> {
         let pid_str = pid.to_string();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(2));
-            let _ = StdCommand::new("kill")
-                .arg("-KILL")
-                .arg(&pid_str)
-                .output();
+            let _ = StdCommand::new("kill").arg("-KILL").arg(&pid_str).output();
         });
     }
     #[cfg(windows)]
     {
         use std::process::Command as StdCommand;
-        let _ = StdCommand::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .output();
+        let mut taskkill = StdCommand::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to start taskkill for PID {}: {}", pid, e))?;
+        let started = Instant::now();
+        loop {
+            match taskkill.try_wait() {
+                Ok(Some(status)) if status.success() => break,
+                Ok(Some(status)) => {
+                    return Err(format!(
+                        "taskkill failed for PID {} with exit code {}",
+                        pid,
+                        status.code().unwrap_or(-1)
+                    ))
+                }
+                Ok(None) if started.elapsed() >= std::time::Duration::from_secs(2) => {
+                    let _ = taskkill.kill();
+                    let _ = taskkill.wait();
+                    return Err(format!("taskkill did not finish promptly for PID {}", pid));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => {
+                    return Err(format!(
+                        "Failed to wait for taskkill on PID {}: {}",
+                        pid, error
+                    ))
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -809,15 +843,59 @@ pub fn get_shell_info_cmd() -> serde_json::Value {
 
 // ─── Streaming Shell Execution ────────────────────────────────────────────
 
-/// Spawn a shell command with streaming output via Tauri events.
-/// Lines from stdout/stderr are emitted in real-time as `shell-stream` events.
-/// When the process exits, a `done` event is emitted with exit code and duration.
-#[tauri::command]
-pub fn spawn_stream_shell(
-    app_handle: tauri::AppHandle,
+pub type StreamEventSink = Arc<dyn Fn(StreamEvent) + Send + Sync + 'static>;
+
+fn is_shell_initialization_noise(text: &str) -> bool {
+    text.contains("command not found: compdef")
+        || text.contains("command not found: compinit")
+        || text.contains("bash: compgen: command not found")
+        || text.contains("bash: complete: command not found")
+}
+
+fn forward_stream_output<R: Read + Send + 'static>(
+    reader: R,
+    session_id: String,
+    kind: &'static str,
+    filter_shell_noise: bool,
+    sink: StreamEventSink,
+) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut bytes = Vec::with_capacity(4096);
+
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let data = decode_output_bytes(&bytes);
+                    if filter_shell_noise && is_shell_initialization_noise(&data) {
+                        continue;
+                    }
+                    sink(StreamEvent {
+                        session_id: session_id.clone(),
+                        kind: kind.into(),
+                        data,
+                        exit_code: None,
+                        duration_ms: None,
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Spawn a shell command and forward output as soon as it is available.
+///
+/// The sink keeps the Tauri-event command on the same process registration and
+/// cancellation lifecycle used by the desktop execution channel.
+pub fn spawn_stream_shell_with_sink(
     session_id: String,
     command: String,
     cwd: Option<String>,
+    timeout_ms: Option<u64>,
+    sink: StreamEventSink,
 ) -> Result<(), String> {
     validate_command(&command)?;
 
@@ -850,211 +928,35 @@ pub fn spawn_stream_shell(
     }
 
     let sid = session_id.clone();
-    let app = app_handle.clone();
-    let _cmd_for_done = command.clone();
     let start = Instant::now();
 
-    // Read stdout in a thread (platform-aware encoding)
-    let sid_out = sid.clone();
-    let app_out = app_handle.clone();
+    // Forward both descriptors independently, preserving their original order
+    // within each stream.  Unlike the old HTTP bridge, this does not wait for
+    // the process to finish before returning stdout/stderr to its caller.
     if let Some(stdout) = child.stdout.take() {
-        std::thread::spawn(move || {
-            #[cfg(windows)]
-            {
-                // Windows: read bytes, decode as GBK→UTF-8
-                let decoder = DecodeReaderBytesBuilder::new()
-                    .encoding(Some(GBK))
-                    .build(stdout);
-                let reader = BufReader::new(decoder);
-                let mut buffer = String::new();
-                let mut last_emit = Instant::now();
-
-                for line in reader.lines() {
-                    match line {
-                        Ok(text) => {
-                            buffer.push_str(&text);
-                            buffer.push('\n');
-
-                            if buffer.len() > 4096 || last_emit.elapsed().as_millis() > 50 {
-                                let event = StreamEvent {
-                                    session_id: sid_out.clone(),
-                                    kind: "stdout".into(),
-                                    data: buffer.clone(),
-                                    exit_code: None,
-                                    duration_ms: None,
-                                };
-                                let _ = app_out.emit("shell-stream", &event);
-                                buffer.clear();
-                                last_emit = Instant::now();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if !buffer.is_empty() {
-                    let event = StreamEvent {
-                        session_id: sid_out.clone(),
-                        kind: "stdout".into(),
-                        data: buffer,
-                        exit_code: None,
-                        duration_ms: None,
-                    };
-                    let _ = app_out.emit("shell-stream", &event);
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                // Non-Windows: standard UTF-8 line reading
-                let reader = BufReader::new(stdout);
-                let mut buffer = String::new();
-                let mut last_emit = Instant::now();
-
-                for line in reader.lines() {
-                    match line {
-                        Ok(text) => {
-                            buffer.push_str(&text);
-                            buffer.push('\n');
-
-                            if buffer.len() > 4096 || last_emit.elapsed().as_millis() > 50 {
-                                let event = StreamEvent {
-                                    session_id: sid_out.clone(),
-                                    kind: "stdout".into(),
-                                    data: buffer.clone(),
-                                    exit_code: None,
-                                    duration_ms: None,
-                                };
-                                let _ = app_out.emit("shell-stream", &event);
-                                buffer.clear();
-                                last_emit = Instant::now();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if !buffer.is_empty() {
-                    let event = StreamEvent {
-                        session_id: sid_out.clone(),
-                        kind: "stdout".into(),
-                        data: buffer,
-                        exit_code: None,
-                        duration_ms: None,
-                    };
-                    let _ = app_out.emit("shell-stream", &event);
-                }
-            }
-        });
+        forward_stream_output(stdout, sid.clone(), "stdout", false, sink.clone());
     }
 
-    // Read stderr in a thread (platform-aware encoding + noise filtering)
-    let sid_err = sid.clone();
-    let app_err = app_handle.clone();
     if let Some(stderr) = child.stderr.take() {
+        forward_stream_output(stderr, sid.clone(), "stderr", true, sink.clone());
+    }
+
+    if let Some(timeout_ms) = timeout_ms.filter(|timeout| *timeout > 0) {
+        let watchdog_sid = sid.clone();
         std::thread::spawn(move || {
-            #[cfg(windows)]
-            {
-                // Windows: read bytes, decode as GBK→UTF-8
-                let decoder = DecodeReaderBytesBuilder::new()
-                    .encoding(Some(GBK))
-                    .build(stderr);
-                let reader = BufReader::new(decoder);
-                let mut buffer = String::new();
-                let mut last_emit = Instant::now();
-
-                for line in reader.lines() {
-                    match line {
-                        Ok(text) => {
-                            // Filter shell initialization noise
-                            if text.contains("command not found: compdef")
-                                || text.contains("command not found: compinit")
-                                || text.contains("bash: compgen: command not found")
-                                || text.contains("bash: complete: command not found")
-                            {
-                                continue;
-                            }
-
-                            buffer.push_str(&text);
-                            buffer.push('\n');
-
-                            if buffer.len() > 4096 || last_emit.elapsed().as_millis() > 50 {
-                                let event = StreamEvent {
-                                    session_id: sid_err.clone(),
-                                    kind: "stderr".into(),
-                                    data: buffer.clone(),
-                                    exit_code: None,
-                                    duration_ms: None,
-                                };
-                                let _ = app_err.emit("shell-stream", &event);
-                                buffer.clear();
-                                last_emit = Instant::now();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if !buffer.is_empty() {
-                    let event = StreamEvent {
-                        session_id: sid_err.clone(),
-                        kind: "stderr".into(),
-                        data: buffer,
-                        exit_code: None,
-                        duration_ms: None,
-                    };
-                    let _ = app_err.emit("shell-stream", &event);
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                // Non-Windows: standard UTF-8 line reading
-                let reader = BufReader::new(stderr);
-                let mut buffer = String::new();
-                let mut last_emit = Instant::now();
-
-                for line in reader.lines() {
-                    match line {
-                        Ok(text) => {
-                            // Filter shell initialization noise
-                            if text.contains("command not found: compdef")
-                                || text.contains("command not found: compinit")
-                                || text.contains("bash: compgen: command not found")
-                                || text.contains("bash: complete: command not found")
-                            {
-                                continue;
-                            }
-
-                            buffer.push_str(&text);
-                            buffer.push('\n');
-
-                            if buffer.len() > 4096 || last_emit.elapsed().as_millis() > 50 {
-                                let event = StreamEvent {
-                                    session_id: sid_err.clone(),
-                                    kind: "stderr".into(),
-                                    data: buffer.clone(),
-                                    exit_code: None,
-                                    duration_ms: None,
-                                };
-                                let _ = app_err.emit("shell-stream", &event);
-                                buffer.clear();
-                                last_emit = Instant::now();
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if !buffer.is_empty() {
-                    let event = StreamEvent {
-                        session_id: sid_err.clone(),
-                        kind: "stderr".into(),
-                        data: buffer,
-                        exit_code: None,
-                        duration_ms: None,
-                    };
-                    let _ = app_err.emit("shell-stream", &event);
-                }
+            std::thread::sleep(std::time::Duration::from_millis(timeout_ms));
+            let is_current = STREAMING_PROCESSES
+                .lock()
+                .map(|processes| processes.get(&watchdog_sid).copied() == Some(pid))
+                .unwrap_or(false);
+            if is_current {
+                let _ = kill_process_by_pid(pid);
             }
         });
     }
 
-    // Wait for process to finish in a thread, then emit "done"
+    // Wait for process completion in a separate thread, then emit a terminal event.
+    let done_sink = sink.clone();
     std::thread::spawn(move || {
         let status = child.wait();
         let elapsed = start.elapsed().as_millis() as u64;
@@ -1062,7 +964,9 @@ pub fn spawn_stream_shell(
         // Remove from registry
         {
             let mut procs = STREAMING_PROCESSES.lock().unwrap();
-            procs.remove(&sid);
+            if procs.get(&sid).copied() == Some(pid) {
+                procs.remove(&sid);
+            }
         }
 
         let (exit_code, success) = match status {
@@ -1081,47 +985,77 @@ pub fn spawn_stream_shell(
             exit_code: Some(exit_code),
             duration_ms: Some(elapsed),
         };
-        let _ = app.emit("shell-stream", &event);
+        done_sink(event);
     });
 
     Ok(())
 }
 
+/// Spawn a shell command with streaming output via Tauri events.
+/// Lines from stdout/stderr are emitted in real-time as `shell-stream` events.
+/// When the process exits, a `done` event is emitted with exit code and duration.
+#[tauri::command]
+pub fn spawn_stream_shell(
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    command: String,
+    cwd: Option<String>,
+) -> Result<(), String> {
+    let sink: StreamEventSink = Arc::new(move |event| {
+        let _ = app_handle.emit("shell-stream", &event);
+    });
+    spawn_stream_shell_with_sink(session_id, command, cwd, None, sink)
+}
+
 /// Kill a running streaming process by session ID.
 #[tauri::command]
 pub fn kill_stream_shell(session_id: String) -> Result<(), String> {
-    let mut procs = STREAMING_PROCESSES.lock().unwrap();
-    if let Some(pid) = procs.remove(&session_id) {
-        // Send SIGTERM on Unix, TerminateProcess on Windows
-        #[cfg(unix)]
-        {
-            use std::process::Command as StdCommand;
-            // Try SIGTERM first, then SIGKILL after 2s
-            let _ = StdCommand::new("kill")
-                .arg("-TERM")
-                .arg(pid.to_string())
-                .output();
-            // Give it 2 seconds, then force kill
-            let pid_str = pid.to_string();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let _ = StdCommand::new("kill")
-                    .arg("-KILL")
-                    .arg(&pid_str)
-                    .output();
-            });
+    let pid = STREAMING_PROCESSES
+        .lock()
+        .map_err(|_| "Process registry lock poisoned".to_string())?
+        .get(&session_id)
+        .copied()
+        .ok_or_else(|| format!("No running process for session: {}", session_id))?;
+
+    if let Err(tree_error) = kill_process_by_pid(pid) {
+        let child = TRACKED_CHILDREN
+            .lock()
+            .map_err(|_| "Process registry lock poisoned".to_string())?
+            .get(&session_id)
+            .cloned();
+        match child {
+            Some(child) => {
+                let mut child = child
+                    .lock()
+                    .map_err(|_| "Command process lock poisoned".to_string())?;
+                if let Err(kill_error) = child.kill() {
+                    if child.try_wait().ok().flatten().is_none() {
+                        return Err(format!(
+                            "{}; direct child fallback failed: {}",
+                            tree_error, kill_error
+                        ));
+                    }
+                }
+                FALLBACK_TERMINATED_SESSIONS
+                    .lock()
+                    .map_err(|_| "Process registry lock poisoned".to_string())?
+                    .insert(session_id.clone());
+            }
+            None => return Err(tree_error),
         }
-        #[cfg(windows)]
-        {
-            use std::process::Command as StdCommand;
-            let _ = StdCommand::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .output();
-        }
-        Ok(())
-    } else {
-        Err(format!("No running process for session: {}", session_id))
     }
+
+    let mut procs = STREAMING_PROCESSES
+        .lock()
+        .map_err(|_| "Process registry lock poisoned".to_string())?;
+    if procs.get(&session_id).copied() == Some(pid) {
+        procs.remove(&session_id);
+    }
+    TRACKED_CHILDREN
+        .lock()
+        .map_err(|_| "Process registry lock poisoned".to_string())?
+        .remove(&session_id);
+    Ok(())
 }
 
 /// List all currently running streaming processes.
@@ -1142,24 +1076,143 @@ pub fn list_stream_shells() -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_simple_command() {
-        let result = execute_shell_internal("echo hello", None, 5000).unwrap();
+        let result = execute_shell_internal("echo hello", None, 5000, false).unwrap();
         assert!(result.success);
         assert!(result.stdout.contains("hello"));
     }
-    
+
     #[test]
     fn test_pwd() {
-        let result = execute_shell_internal("pwd", None, 5000).unwrap();
+        #[cfg(windows)]
+        let command = "cd";
+        #[cfg(not(windows))]
+        let command = "pwd";
+
+        let result = execute_shell_internal(command, None, 5000, false).unwrap();
         assert!(result.success);
         assert!(!result.stdout.is_empty());
     }
-    
+
     #[test]
     fn test_dangerous_command_rejected() {
-        let result = execute_shell_internal("rm -rf /", None, 5000);
+        let result = execute_shell_internal("rm -rf /", None, 5000, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn timed_out_command_is_terminated_and_reported() {
+        #[cfg(windows)]
+        let command = "ping 127.0.0.1 -n 20 > nul";
+        #[cfg(not(windows))]
+        let command = "sleep 5";
+
+        let result = execute_shell_internal(command, None, 100, false)
+            .expect("timeout should produce a result after terminating the command");
+        assert!(result.timed_out);
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn streaming_output_is_emitted_before_command_completion() {
+        let session_id = format!(
+            "stream-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        #[cfg(windows)]
+        let command = "echo first & ping 127.0.0.1 -n 3 > nul & echo second";
+        #[cfg(not(windows))]
+        let command = "printf 'first\\n'; sleep 2; printf 'second\\n'";
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let sink: StreamEventSink = Arc::new(move |event| {
+            let _ = sender.send(event);
+        });
+        spawn_stream_shell_with_sink(session_id, command.into(), None, Some(5_000), sink)
+            .expect("stream command should start");
+
+        let first = receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("first output should arrive before the command completes");
+        assert_eq!(first.kind, "stdout");
+        assert!(first.data.contains("first"));
+
+        let mut received_done = false;
+        for _ in 0..4 {
+            let event = receiver
+                .recv_timeout(std::time::Duration::from_secs(4))
+                .expect("stream should finish");
+            if event.kind == "done" {
+                received_done = true;
+                break;
+            }
+        }
+        assert!(received_done, "stream should publish a done event");
+    }
+
+    #[test]
+    fn utf8_output_is_not_mojibake_on_windows() {
+        #[cfg(windows)]
+        let command = "powershell -NoProfile -Command \"[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Write-Output '中文UTF8'\"";
+        #[cfg(not(windows))]
+        let command = "printf '中文UTF8'";
+
+        let result =
+            execute_shell_internal(command, None, 5_000, false).expect("UTF-8 command should run");
+        assert!(result.success, "stderr: {}", result.stderr);
+        assert!(
+            result.stdout.contains("中文UTF8"),
+            "stdout: {}",
+            result.stdout
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tracked_command_can_be_cancelled() {
+        let session_id = format!(
+            "cancel-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        #[cfg(windows)]
+        let command = "ping 127.0.0.1 -n 20 > nul";
+        #[cfg(not(windows))]
+        let command = "sleep 20";
+
+        let run_session_id = session_id.clone();
+        let task = tokio::spawn(async move {
+            execute_shell_with_tracking(command, None, 30_000, false, run_session_id).await
+        });
+
+        let mut registered = false;
+        for _ in 0..20 {
+            if STREAMING_PROCESSES
+                .lock()
+                .expect("registry lock")
+                .contains_key(&session_id)
+            {
+                registered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(registered, "tracked command should register its PID");
+
+        kill_stream_shell(session_id).expect("tracked command should be cancellable");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("cancelled command should finish promptly")
+            .expect("task join");
+
+        if let Ok(shell_result) = result {
+            assert!(!shell_result.success);
+        }
     }
 }

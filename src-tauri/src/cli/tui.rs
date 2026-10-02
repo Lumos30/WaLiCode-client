@@ -8,11 +8,14 @@
 //! 1. 欢迎界面（首次进入）：居中 Logo + 输入框 + 快捷提示
 //! 2. 命令窗口（输入后）：全宽消息区 + 底部输入栏 + footer
 
-use crate::_cli_app::{App, AppEvent, CliArgs, Message, ToolStatus, ReActEvent};
-use crate::_cli_sse::{SseClient, build_project_context};
+use crate::_cli_app::{App, AppEvent, CliArgs, Message, ReActEvent, ToolStatus};
+use crate::_cli_sse::{build_project_context, SseClient};
 
 use crossterm::{
-    event::{Event as CEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent, KeyModifiers,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -21,7 +24,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
     Frame, Terminal,
 };
 use std::io::{self, Read};
@@ -41,12 +46,12 @@ fn is_tty() -> bool {
 
 fn syntax_set() -> &'static SyntaxSet {
     static SS: OnceLock<SyntaxSet> = OnceLock::new();
-    SS.get_or_init(|| SyntaxSet::load_defaults_newlines())
+    SS.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn theme_set() -> &'static ThemeSet {
     static TS: OnceLock<ThemeSet> = OnceLock::new();
-    TS.get_or_init(|| ThemeSet::load_defaults())
+    TS.get_or_init(ThemeSet::load_defaults)
 }
 
 fn syntect_color(color: syntect::highlighting::Color) -> ratatui::style::Color {
@@ -64,7 +69,9 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
 
     let mut result = Vec::new();
     for line in code.lines() {
-        let Ok(ranges) = h.highlight_line(line, syntax_set()) else { continue };
+        let Ok(ranges) = h.highlight_line(line, syntax_set()) else {
+            continue;
+        };
         let mut spans: Vec<Span<'static>> = Vec::new();
         for (style, text) in ranges {
             let fg = syntect_color(style.foreground);
@@ -78,7 +85,10 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
             if style.font_style.contains(FontStyle::UNDERLINE) {
                 modifier |= Modifier::UNDERLINED;
             }
-            spans.push(Span::styled(text.to_string(), Style::default().fg(fg).add_modifier(modifier)));
+            spans.push(Span::styled(
+                text.to_string(),
+                Style::default().fg(fg).add_modifier(modifier),
+            ));
         }
         if spans.is_empty() {
             spans.push(Span::styled(String::new(), Style::default()));
@@ -89,28 +99,38 @@ fn highlight_code(code: &str, lang: &str) -> Vec<Line<'static>> {
 }
 
 /// 在代码块外渲染带边框的容器
-fn render_code_in_box(highlighted: Vec<Line<'static>>, lang: &str, term_width: u16) -> Vec<Line<'static>> {
+fn render_code_in_box(
+    highlighted: Vec<Line<'static>>,
+    lang: &str,
+    term_width: u16,
+) -> Vec<Line<'static>> {
     let mut result = Vec::new();
-    let max_content_width = highlighted.iter()
+    let max_content_width = highlighted
+        .iter()
         .map(|l| l.width())
         .max()
         .unwrap_or(0)
         .min(term_width.saturating_sub(4) as usize);
 
-    let lang_label = if lang.is_empty() { String::new() } else { format!(" {}", lang) };
+    let lang_label = if lang.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", lang)
+    };
     let border_content = format!("─{} ", lang_label);
     let dash_count = max_content_width.saturating_sub(border_content.len().saturating_sub(1));
     let top = format!("┌─{} ─{}┐", lang_label, "─".repeat(dash_count));
-    result.push(Line::from(Span::styled(top, Style::default().fg(theme::FG_MUTED))));
+    result.push(Line::from(Span::styled(
+        top,
+        Style::default().fg(theme::FG_MUTED),
+    )));
 
     for line in highlighted {
         let content_width = line.width();
         let padding = max_content_width.saturating_sub(content_width);
-        let mut spans = vec![
-            Span::styled("│ ", Style::default().fg(theme::FG_MUTED)),
-        ];
+        let mut spans = vec![Span::styled("│ ", Style::default().fg(theme::FG_MUTED))];
         for span in line.spans {
-            spans.push(Span::styled(span.content.to_string(), span.style.clone()));
+            spans.push(Span::styled(span.content.to_string(), span.style));
         }
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), Style::default()));
@@ -120,7 +140,10 @@ fn render_code_in_box(highlighted: Vec<Line<'static>>, lang: &str, term_width: u
     }
 
     let bottom = format!("└─{}─┘", "─".repeat(max_content_width + 1));
-    result.push(Line::from(Span::styled(bottom, Style::default().fg(theme::FG_MUTED))));
+    result.push(Line::from(Span::styled(
+        bottom,
+        Style::default().fg(theme::FG_MUTED),
+    )));
     result
 }
 
@@ -192,30 +215,34 @@ async fn run_one_shot(args: CliArgs, message: String) {
     let project_context = build_project_context(&args.workdir);
 
     let result = sse
-        .chat_stream(&args.agent_id, &args.user_id, &session_id, &message, project_context)
+        .chat_stream(
+            &args.agent_id,
+            &args.user_id,
+            &session_id,
+            &message,
+            project_context,
+        )
         .await;
 
     let mut full_text = String::new();
     while let Some(event) = event_rx.recv().await {
         match event {
-            AppEvent::SseEvent(e) => {
-                match e.event.as_str() {
-                    "text" => {
-                        full_text = e.full_text.or(e.content).unwrap_or_default();
-                    }
-                    "done" => {
-                        if !full_text.is_empty() {
-                            println!("{}", full_text);
-                        }
-                        return;
-                    }
-                    "error" => {
-                        eprintln!("Error: {}", e.content.unwrap_or_default());
-                        return;
-                    }
-                    _ => {}
+            AppEvent::SseEvent(e) => match e.event.as_str() {
+                "text" => {
+                    full_text = e.full_text.or(e.content).unwrap_or_default();
                 }
-            }
+                "done" => {
+                    if !full_text.is_empty() {
+                        println!("{}", full_text);
+                    }
+                    return;
+                }
+                "error" => {
+                    eprintln!("Error: {}", e.content.unwrap_or_default());
+                    return;
+                }
+                _ => {}
+            },
             AppEvent::Done => {
                 if !full_text.is_empty() {
                     println!("{}", full_text);
@@ -248,7 +275,10 @@ async fn run_tui(args: CliArgs) {
     }
 
     if let Err(e) = enable_raw_mode() {
-        eprintln!("Cannot enable raw mode ({}), switching to non-interactive", e);
+        eprintln!(
+            "Cannot enable raw mode ({}), switching to non-interactive",
+            e
+        );
         let mut message = String::new();
         if std::io::stdin().read_to_string(&mut message).is_ok() && !message.trim().is_empty() {
             run_one_shot(args, message.trim().to_string()).await;
@@ -267,7 +297,8 @@ async fn run_tui(args: CliArgs) {
     }));
 
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).expect("Failed to enter alternate screen");
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .expect("Failed to enter alternate screen");
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
@@ -285,23 +316,29 @@ async fn run_tui(args: CliArgs) {
     } else {
         show_welcome = false;
         app.messages.push(Message::Error {
-            text: format!("Cannot connect to WaLiCode server: {}", session_result.unwrap_err())
+            text: format!(
+                "Cannot connect to WaLiCode server: {}",
+                session_result.unwrap_err()
+            ),
         });
     }
 
     loop {
-        terminal.draw(|f| {
-            if show_welcome {
-                render_welcome(f, &app);
-            } else {
-                render_chat(f, &app);
-            }
-            if app.command_palette_open {
-                render_command_palette(f, &app);
-            }
-        }).expect("Failed to draw");
+        terminal
+            .draw(|f| {
+                if show_welcome {
+                    render_welcome(f, &app);
+                } else {
+                    render_chat(f, &app);
+                }
+                if app.command_palette_open {
+                    render_command_palette(f, &app);
+                }
+            })
+            .expect("Failed to draw");
 
-        if crossterm::event::poll(std::time::Duration::from_millis(50)).expect("Event poll failed") {
+        if crossterm::event::poll(std::time::Duration::from_millis(50)).expect("Event poll failed")
+        {
             if let Ok(c_event) = crossterm::event::read() {
                 match c_event {
                     CEvent::Key(key) => {
@@ -329,7 +366,7 @@ async fn run_tui(args: CliArgs) {
                         }
                         continue;
                     }
-                    app.handle_event(e);
+                    app.handle_event(*e);
                 }
                 AppEvent::Done => {
                     app.is_streaming = false;
@@ -357,7 +394,8 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture
-    ).expect("Failed to leave alternate screen");
+    )
+    .expect("Failed to leave alternate screen");
     terminal.show_cursor().expect("Failed to show cursor");
 }
 
@@ -370,13 +408,14 @@ fn render_welcome(f: &mut Frame, app: &App) {
 
     // 垂直居中
     let chunks = Layout::vertical([
-        Constraint::Percentage(25),  // 顶部留白
-        Constraint::Length(6),       // Logo
-        Constraint::Length(3),       // 输入框
-        Constraint::Length(1),       // 快捷提示
-        Constraint::Length(1),       // Tip
-        Constraint::Min(0),          // 底部留白
-    ]).split(size);
+        Constraint::Percentage(25), // 顶部留白
+        Constraint::Length(6),      // Logo
+        Constraint::Length(3),      // 输入框
+        Constraint::Length(1),      // 快捷提示
+        Constraint::Length(1),      // Tip
+        Constraint::Min(0),         // 底部留白
+    ])
+    .split(size);
 
     // 1. Logo：「WaLi」蓝 · 「Code」橙
     let wa_li_color = theme::ACCENT;
@@ -384,58 +423,220 @@ fn render_welcome(f: &mut Frame, app: &App) {
 
     let logo_lines = vec![
         Line::from(vec![
-            Span::styled("██╗    ██╗ ", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("█████╗ ", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╗     ██╗ ", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ██████╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ██████╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ██████╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ███████╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "██╗    ██╗ ",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "█████╗ ",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╗     ██╗ ",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ██████╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ██████╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ██████╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ███████╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("██║    ██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╔══██╗", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║     ██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╔════╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╔═══██╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ██╔══██╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╔════╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "██║    ██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╔══██╗",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║     ██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╔════╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╔═══██╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ██╔══██╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╔════╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("██║ █╗ ██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("███████║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║     ██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║     ", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║   ██║", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ██║  ██║", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("█████╗  ", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "██║ █╗ ██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "███████║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║     ██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║     ",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║   ██║",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ██║  ██║",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "█████╗  ",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("██║███╗██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╔══██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║     ██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║     ", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║   ██║", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ██║  ██║", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██╔══╝  ", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "██║███╗██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╔══██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║     ██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║     ",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║   ██║",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ██║  ██║",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██╔══╝  ",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("╚███╔███╔╝", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("██║  ██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("███████╗██║", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("╚██████╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("╚██████╔╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("╚██████╔╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("███████╗", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "╚███╔███╔╝",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "██║  ██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "███████╗██║",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "╚██████╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "╚██████╔╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "╚██████╔╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "███████╗",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(" ╚══╝╚══╝ ", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("╚═╝  ╚═╝", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled("╚══════╝╚═╝", Style::default().fg(wa_li_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ╚═════╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ╚═════╝ ", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled(" ╚═════╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
-            Span::styled("╚══════╝", Style::default().fg(code_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ╚══╝╚══╝ ",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "╚═╝  ╚═╝",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "╚══════╝╚═╝",
+                Style::default()
+                    .fg(wa_li_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ╚═════╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ╚═════╝ ",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " ╚═════╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "╚══════╝",
+                Style::default().fg(code_color).add_modifier(Modifier::BOLD),
+            ),
         ]),
     ];
     let logo = Paragraph::new(logo_lines).alignment(Alignment::Center);
@@ -468,8 +669,12 @@ fn render_welcome(f: &mut Frame, app: &App) {
     let input_display: Vec<Line> = if input_text.is_empty() {
         vec![Line::from(vec![
             Span::styled("> ", Style::default().fg(theme::INPUT_PROMPT)),
-            Span::styled("请输入你的问题... (Enter 发送, Shift+Enter 换行)",
-                Style::default().fg(theme::FG_PLACEHOLDER).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "请输入你的问题... (Enter 发送, Shift+Enter 换行)",
+                Style::default()
+                    .fg(theme::FG_PLACEHOLDER)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ])]
     } else {
         let mut lines = Vec::new();
@@ -491,8 +696,8 @@ fn render_welcome(f: &mut Frame, app: &App) {
         lines
     };
 
-    let input_widget = Paragraph::new(input_display)
-        .style(Style::default().fg(theme::FG).bg(theme::BG));
+    let input_widget =
+        Paragraph::new(input_display).style(Style::default().fg(theme::FG).bg(theme::BG));
     f.render_widget(input_widget, input_inner);
 
     // 3. 快捷提示
@@ -501,17 +706,24 @@ fn render_welcome(f: &mut Frame, app: &App) {
         Span::styled("切换智能体", Style::default().fg(theme::ACCENT)),
         Span::styled("  ctrl+p ", Style::default().fg(theme::FG_DIM)),
         Span::styled("命令面板", Style::default().fg(theme::ACCENT)),
-    ])).alignment(Alignment::Center);
+    ]))
+    .alignment(Alignment::Center);
     f.render_widget(hint, chunks[3]);
 
     // 4. 提示
     let tip = Paragraph::new(Line::from(vec![
-        Span::styled("提示 ", Style::default().fg(theme::ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "提示 ",
+            Style::default()
+                .fg(theme::ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("/help ", Style::default().fg(theme::ACCENT)),
         Span::styled("查看帮助  ", Style::default().fg(theme::FG_DIM)),
         Span::styled("/status ", Style::default().fg(theme::ACCENT)),
         Span::styled("查看状态", Style::default().fg(theme::FG_DIM)),
-    ])).alignment(Alignment::Center);
+    ]))
+    .alignment(Alignment::Center);
     f.render_widget(tip, chunks[4]);
 }
 
@@ -528,24 +740,27 @@ fn render_chat(f: &mut Frame, app: &App) {
     let input_height = (app.input_lines.len() as u16 + 2).clamp(3, 8);
 
     let main_chunks = Layout::vertical([
-        Constraint::Min(5),              // 消息区 + 信息面板
+        Constraint::Min(5),               // 消息区 + 信息面板
         Constraint::Length(input_height), // 输入区
-        Constraint::Length(1),           // Footer
-    ]).split(size);
+        Constraint::Length(1),            // Footer
+    ])
+    .split(size);
 
     // 水平分割消息区：左消息 + 右面板
     let pad: u16 = 1;
     let panel_w = if size.width > 80 { PANEL_WIDTH } else { 0 };
     let msg_w = size.width.saturating_sub(panel_w);
-    let mid_chunks = Layout::horizontal([
-        Constraint::Length(msg_w),
-        Constraint::Length(panel_w),
-    ]).split(main_chunks[0]);
+    let mid_chunks = Layout::horizontal([Constraint::Length(msg_w), Constraint::Length(panel_w)])
+        .split(main_chunks[0]);
 
     // 先填充消息区背景，再在内部偏移渲染内容
     let msg_bg = Block::default().style(Style::default().bg(theme::BG));
     f.render_widget(msg_bg, mid_chunks[0]);
-    let msg_area = Rect { x: mid_chunks[0].x + pad, width: mid_chunks[0].width.saturating_sub(pad), ..mid_chunks[0] };
+    let msg_area = Rect {
+        x: mid_chunks[0].x + pad,
+        width: mid_chunks[0].width.saturating_sub(pad),
+        ..mid_chunks[0]
+    };
     render_messages(f, msg_area, app);
     if panel_w > 0 {
         render_right_panel(f, mid_chunks[1], app);
@@ -567,9 +782,10 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
         match msg {
             Message::User { text } => {
                 lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("You", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "You",
+                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                )]));
                 let md_lines = parse_markdown_owned(text, term_width);
                 for md_line in md_lines {
                     lines.push(md_line);
@@ -582,7 +798,10 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                 let status_color = if *done { theme::SUCCESS } else { theme::ORANGE };
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled("Ai", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Ai",
+                        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(status, Style::default().fg(status_color)),
                 ]));
                 let content_lines = parse_content_with_thinking_opencode(text, term_width);
@@ -592,7 +811,12 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from(""));
             }
 
-            Message::ToolCall { tool_name, args, status, .. } => {
+            Message::ToolCall {
+                tool_name,
+                args,
+                status,
+                ..
+            } => {
                 // 工具调用：■ 状态 + 工具名 + 参数摘要（单行）
                 let (icon, color) = match status {
                     ToolStatus::InProgress => ("■", theme::ORANGE),
@@ -600,18 +824,31 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                     ToolStatus::Failure => ("■", theme::ERROR),
                 };
                 let args_summary = if args.len() > 50 {
-                    format!("{}...", &args.chars().take(50).collect::<String>())
+                    format!("{}...", args.chars().take(50).collect::<String>())
                 } else {
                     args.clone()
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                    Span::styled(tool_name.clone(), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!(" {}", args_summary), Style::default().fg(theme::FG_DIM)),
+                    Span::styled(
+                        tool_name.clone(),
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" {}", args_summary),
+                        Style::default().fg(theme::FG_DIM),
+                    ),
                 ]));
             }
 
-            Message::ToolResult { tool_name, result, status, .. } => {
+            Message::ToolResult {
+                tool_name,
+                result,
+                status,
+                ..
+            } => {
                 // 工具结果：■ 状态 + 工具名 + 截断结果（单行）
                 let (icon, color) = match status {
                     ToolStatus::Success => ("■", theme::SUCCESS),
@@ -619,13 +856,20 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
                     ToolStatus::InProgress => ("■", theme::ORANGE),
                 };
                 let display = if result.len() > 80 {
-                    format!("{}... ({} chars)", &result.chars().take(80).collect::<String>(), result.len())
+                    format!(
+                        "{}... ({} chars)",
+                        result.chars().take(80).collect::<String>(),
+                        result.len()
+                    )
                 } else {
                     result.clone()
                 };
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                    Span::styled(format!("{}: ", tool_name), Style::default().fg(theme::ACCENT)),
+                    Span::styled(
+                        format!("{}: ", tool_name),
+                        Style::default().fg(theme::ACCENT),
+                    ),
                     Span::styled(display, Style::default().fg(theme::FG_DIM)),
                 ]));
             }
@@ -633,40 +877,56 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
             Message::Error { text } => {
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
-                    Span::styled("Error: ", Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Error: ",
+                        Style::default()
+                            .fg(theme::ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(text.clone(), Style::default().fg(theme::ERROR)),
                 ]));
                 lines.push(Line::from(""));
             }
 
             Message::System { text } => {
-                lines.push(Line::from(vec![
-                    Span::styled(text.clone(), Style::default().fg(theme::FG_DIM)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    text.clone(),
+                    Style::default().fg(theme::FG_DIM),
+                )]));
             }
 
             Message::Diff { summary } => {
                 lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("File Changes", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "File Changes",
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 if let Some(ref desc) = summary.description {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {}", desc), Style::default().fg(theme::FG_DIM)),
-                    ]));
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("  {}", desc),
+                        Style::default().fg(theme::FG_DIM),
+                    )]));
                 }
                 for f in &summary.created {
                     lines.push(Line::from(vec![
                         Span::styled("  + ", Style::default().fg(theme::SUCCESS)),
                         Span::styled(f.path.clone(), Style::default().fg(theme::FG)),
-                        Span::styled(format!(" (+{} lines)", f.added_lines), Style::default().fg(theme::FG_DIM)),
+                        Span::styled(
+                            format!(" (+{} lines)", f.added_lines),
+                            Style::default().fg(theme::FG_DIM),
+                        ),
                     ]));
                 }
                 for f in &summary.modified {
                     lines.push(Line::from(vec![
                         Span::styled("  ~ ", Style::default().fg(theme::ACCENT)),
                         Span::styled(f.path.clone(), Style::default().fg(theme::FG)),
-                        Span::styled(format!(" (+{}, -{})", f.added_lines, f.removed_lines), Style::default().fg(theme::FG_DIM)),
+                        Span::styled(
+                            format!(" (+{}, -{})", f.added_lines, f.removed_lines),
+                            Style::default().fg(theme::FG_DIM),
+                        ),
                     ]));
                 }
                 for f in &summary.deleted {
@@ -684,12 +944,18 @@ fn render_messages(f: &mut Frame, area: Rect, app: &App) {
     if app.is_streaming && app.streaming_text.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("Ai", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Ai",
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ◐", Style::default().fg(theme::ORANGE)),
         ]));
-        lines.push(Line::from(vec![
-            Span::styled("Thinking...", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            "Thinking...",
+            Style::default()
+                .fg(theme::FG_DIM)
+                .add_modifier(Modifier::ITALIC),
+        )]));
     }
 
     // 渲染消息区
@@ -728,13 +994,22 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(theme::BORDER_FOCUS))
         .style(Style::default().bg(theme::BG));
     let raw_inner = input_block.inner(area);
-    let inner = Rect { x: raw_inner.x + 1, width: raw_inner.width.saturating_sub(1), ..raw_inner };
+    let inner = Rect {
+        x: raw_inner.x + 1,
+        width: raw_inner.width.saturating_sub(1),
+        ..raw_inner
+    };
     f.render_widget(input_block, area);
 
     if app.is_streaming {
         let waiting = Paragraph::new(Line::from(vec![
             Span::styled(" ◐ ", Style::default().fg(theme::ORANGE)),
-            Span::styled("AI 回复中... Esc 取消", Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                "AI 回复中... Esc 取消",
+                Style::default()
+                    .fg(theme::FG_DIM)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ]))
         .style(Style::default().fg(theme::FG).bg(theme::BG));
         f.render_widget(waiting, inner);
@@ -764,20 +1039,25 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled("▎", Style::default().fg(theme::INPUT_CURSOR)));
                 spans.push(Span::styled(after, Style::default().fg(theme::FG)));
             } else {
-                spans.push(Span::styled(line.to_string(), Style::default().fg(theme::FG)));
+                spans.push(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(theme::FG),
+                ));
             }
             input_render_lines.push(Line::from(spans));
         }
 
         // Placeholder
         if app.input_lines.len() == 1 && app.input_lines[0].is_empty() {
-            input_render_lines = vec![
-                Line::from(vec![
-                    Span::styled("> ", Style::default().fg(theme::INPUT_PROMPT)),
-                    Span::styled("请输入你的问题... (Enter 发送, Shift+Enter 换行, ↑↓ 历史)",
-                        Style::default().fg(theme::FG_PLACEHOLDER).add_modifier(Modifier::ITALIC)),
-                ]),
-            ];
+            input_render_lines = vec![Line::from(vec![
+                Span::styled("> ", Style::default().fg(theme::INPUT_PROMPT)),
+                Span::styled(
+                    "请输入你的问题... (Enter 发送, Shift+Enter 换行, ↑↓ 历史)",
+                    Style::default()
+                        .fg(theme::FG_PLACEHOLDER)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ])];
         }
 
         let input = Paragraph::new(input_render_lines)
@@ -790,22 +1070,34 @@ fn render_input(f: &mut Frame, area: Rect, app: &App) {
 /// Footer：opencode 风格 — 信息密度高，一行搞定
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let msg_count = app.messages.len();
-    let total_chars: usize = app.messages.iter().map(|m| match m {
-        Message::User { text } => text.len(),
-        Message::Assistant { text, .. } => text.len(),
-        Message::ToolCall { args, .. } => args.len(),
-        Message::ToolResult { result, .. } => result.len(),
-        Message::Error { text } => text.len(),
-        Message::System { text } => text.len(),
-        Message::Diff { summary } => {
-            let mut len = 0usize;
-            if let Some(ref d) = summary.description { len += d.len(); }
-            for f in &summary.created { len += f.path.len(); }
-            for f in &summary.modified { len += f.path.len(); }
-            for f in &summary.deleted { len += f.path.len(); }
-            len
-        }
-    }).sum();
+    let total_chars: usize = app
+        .messages
+        .iter()
+        .map(|m| match m {
+            Message::User { text } => text.len(),
+            Message::Assistant { text, .. } => text.len(),
+            Message::ToolCall { args, .. } => args.len(),
+            Message::ToolResult { result, .. } => result.len(),
+            Message::Error { text } => text.len(),
+            Message::System { text } => text.len(),
+            Message::Diff { summary } => {
+                let mut len = 0usize;
+                if let Some(ref d) = summary.description {
+                    len += d.len();
+                }
+                for f in &summary.created {
+                    len += f.path.len();
+                }
+                for f in &summary.modified {
+                    len += f.path.len();
+                }
+                for f in &summary.deleted {
+                    len += f.path.len();
+                }
+                len
+            }
+        })
+        .sum();
     let token_display = if total_chars > 1000 {
         format!("{}.{}K", total_chars / 1000, (total_chars % 1000) / 100)
     } else {
@@ -813,34 +1105,54 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     };
 
     // 项目名 + 状态
-    let project_name = app.workdir.as_ref()
-        .and_then(|d| d.split('/').last())
+    let project_name = app
+        .workdir
+        .as_ref()
+        .and_then(|d| d.split('/').next_back())
         .unwrap_or("unknown");
 
     let status_indicator = if app.is_streaming {
         vec![
             Span::styled("◐ ", Style::default().fg(theme::ORANGE)),
-            Span::styled(project_name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                project_name,
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
         ]
     } else if app.manual_scroll {
         vec![
             Span::styled("↑ ", Style::default().fg(theme::ACCENT)),
-            Span::styled(project_name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                project_name,
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
         ]
     } else {
         vec![
             Span::styled("● ", Style::default().fg(theme::SUCCESS)),
-            Span::styled(project_name, Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                project_name,
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
         ]
     };
 
     let footer_text = Line::from({
         let mut spans = status_indicator;
-        spans.push(Span::styled(format!(" │ {}msg │ {} ", msg_count, token_display), Style::default().fg(theme::FG_DIM)));
+        spans.push(Span::styled(
+            format!(" │ {}msg │ {} ", msg_count, token_display),
+            Style::default().fg(theme::FG_DIM),
+        ));
         spans.push(Span::styled("ctrl+p", Style::default().fg(theme::ACCENT)));
-        spans.push(Span::styled(" 命令面板", Style::default().fg(theme::FG_DIM)));
+        spans.push(Span::styled(
+            " 命令面板",
+            Style::default().fg(theme::FG_DIM),
+        ));
         spans.push(Span::raw("  "));
-        spans.push(Span::styled("● v0.1.0", Style::default().fg(theme::FG_MUTED)));
+        spans.push(Span::styled(
+            "● v0.1.0",
+            Style::default().fg(theme::FG_MUTED),
+        ));
         spans
     });
 
@@ -873,22 +1185,34 @@ fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
     let session_ok = app.session_id.is_some();
 
     let msg_count = app.messages.len();
-    let total_chars: usize = app.messages.iter().map(|m| match m {
-        Message::User { text } => text.len(),
-        Message::Assistant { text, .. } => text.len(),
-        Message::ToolCall { args, .. } => args.len(),
-        Message::ToolResult { result, .. } => result.len(),
-        Message::Error { text } => text.len(),
-        Message::System { text } => text.len(),
-        Message::Diff { summary } => {
-            let mut l = 0;
-            if let Some(ref d) = summary.description { l += d.len(); }
-            for f in &summary.created { l += f.path.len(); }
-            for f in &summary.modified { l += f.path.len(); }
-            for f in &summary.deleted { l += f.path.len(); }
-            l
-        }
-    }).sum();
+    let total_chars: usize = app
+        .messages
+        .iter()
+        .map(|m| match m {
+            Message::User { text } => text.len(),
+            Message::Assistant { text, .. } => text.len(),
+            Message::ToolCall { args, .. } => args.len(),
+            Message::ToolResult { result, .. } => result.len(),
+            Message::Error { text } => text.len(),
+            Message::System { text } => text.len(),
+            Message::Diff { summary } => {
+                let mut l = 0;
+                if let Some(ref d) = summary.description {
+                    l += d.len();
+                }
+                for f in &summary.created {
+                    l += f.path.len();
+                }
+                for f in &summary.modified {
+                    l += f.path.len();
+                }
+                for f in &summary.deleted {
+                    l += f.path.len();
+                }
+                l
+            }
+        })
+        .sum();
     let token_display = if total_chars > 1000 {
         format!("{}.{}K", total_chars / 1000, (total_chars % 1000) / 100)
     } else {
@@ -896,38 +1220,52 @@ fn render_right_panel(f: &mut Frame, area: Rect, app: &App) {
     };
 
     let sid = app.session_id.as_deref().unwrap_or("-");
-    let sid_short = if sid.len() > 12 { format!("{}..", &sid[..12]) } else { sid.to_string() };
+    let sid_short = if sid.len() > 12 {
+        format!("{}..", &sid[..12])
+    } else {
+        sid.to_string()
+    };
 
     let rows = vec![
-        Line::from(vec![
-            Span::styled(if session_ok { "●" } else { "○" },
-                Style::default().fg(if session_ok { theme::SUCCESS } else { theme::PANEL_MUTED })),
-        ]),
+        Line::from(vec![Span::styled(
+            if session_ok { "●" } else { "○" },
+            Style::default().fg(if session_ok {
+                theme::SUCCESS
+            } else {
+                theme::PANEL_MUTED
+            }),
+        )]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("session", Style::default().fg(theme::PANEL_MUTED)),
-        ]),
-        Line::from(vec![
-            Span::styled(sid_short, Style::default().fg(theme::PANEL_DIM)),
-        ]),
+        Line::from(vec![Span::styled(
+            "session",
+            Style::default().fg(theme::PANEL_MUTED),
+        )]),
+        Line::from(vec![Span::styled(
+            sid_short,
+            Style::default().fg(theme::PANEL_DIM),
+        )]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("agent", Style::default().fg(theme::PANEL_MUTED)),
-        ]),
-        Line::from(vec![
-            Span::styled(&app.agent_id, Style::default().fg(theme::PANEL_FG)),
-        ]),
+        Line::from(vec![Span::styled(
+            "agent",
+            Style::default().fg(theme::PANEL_MUTED),
+        )]),
+        Line::from(vec![Span::styled(
+            &app.agent_id,
+            Style::default().fg(theme::PANEL_FG),
+        )]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(format!("{} msgs", msg_count), Style::default().fg(theme::PANEL_DIM)),
-        ]),
-        Line::from(vec![
-            Span::styled(token_display, Style::default().fg(theme::PANEL_MUTED)),
-        ]),
+        Line::from(vec![Span::styled(
+            format!("{} msgs", msg_count),
+            Style::default().fg(theme::PANEL_DIM),
+        )]),
+        Line::from(vec![Span::styled(
+            token_display,
+            Style::default().fg(theme::PANEL_MUTED),
+        )]),
     ];
 
-    let content = Paragraph::new(rows)
-        .style(Style::default().fg(theme::PANEL_FG).bg(theme::PANEL_BG));
+    let content =
+        Paragraph::new(rows).style(Style::default().fg(theme::PANEL_FG).bg(theme::PANEL_BG));
     f.render_widget(content, inner);
 }
 
@@ -966,21 +1304,28 @@ fn render_command_palette(f: &mut Frame, app: &App) {
 
     // 过滤输入
     let filter_text = if app.command_palette_filter.is_empty() {
-        format!("> ")
+        "> ".to_string()
     } else {
         format!("> {}", app.command_palette_filter)
     };
-    let filter_line = Line::from(Span::styled(filter_text, Style::default().fg(theme::INPUT_PROMPT)));
-    f.render_widget(Paragraph::new(filter_line), Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    });
+    let filter_line = Line::from(Span::styled(
+        filter_text,
+        Style::default().fg(theme::INPUT_PROMPT),
+    ));
+    f.render_widget(
+        Paragraph::new(filter_line),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
 
     // 过滤后的命令列表
     let items: &[(&str, &str)] = COMMAND_PALETTE_ITEMS;
-    let filtered: Vec<_> = items.iter()
+    let filtered: Vec<_> = items
+        .iter()
         .filter(|(cmd, _)| cmd.contains(&app.command_palette_filter))
         .collect();
 
@@ -1040,7 +1385,11 @@ fn parse_markdown_owned(text: &str, term_width: u16) -> Vec<Line<'static>> {
                 in_code_block = false;
             } else {
                 in_code_block = true;
-                code_lang = line.trim_start().trim_start_matches("```").trim().to_string();
+                code_lang = line
+                    .trim_start()
+                    .trim_start_matches("```")
+                    .trim()
+                    .to_string();
             }
             continue;
         }
@@ -1080,10 +1429,12 @@ fn parse_markdown_owned(text: &str, term_width: u16) -> Vec<Line<'static>> {
             let header_text = pending_setext.take().unwrap();
             let level = if trimmed.starts_with('=') { 1 } else { 2 };
             let spans = parse_inline_markdown_owned(&header_text);
-            let mut header_spans = vec![
-                Span::styled("#".repeat(level) + " ",
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            ];
+            let mut header_spans = vec![Span::styled(
+                "#".repeat(level) + " ",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )];
             header_spans.extend(spans);
             lines.push(Line::from(header_spans));
             continue;
@@ -1093,10 +1444,12 @@ fn parse_markdown_owned(text: &str, term_width: u16) -> Vec<Line<'static>> {
         if let Some(header_level) = detect_header(trimmed) {
             let header_text = &trimmed[header_level..].trim();
             let spans = parse_inline_markdown_owned(header_text);
-            let mut header_spans = vec![
-                Span::styled("#".repeat(header_level) + " ",
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
-            ];
+            let mut header_spans = vec![Span::styled(
+                "#".repeat(header_level) + " ",
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )];
             header_spans.extend(spans);
             lines.push(Line::from(header_spans));
             pending_setext = None;
@@ -1132,10 +1485,12 @@ fn apply_list_style(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
 
     // - 列表项
     if trimmed.starts_with("- ") {
-        let mut result = vec![
-            Span::styled("- ", Style::default().fg(theme::ACCENT)),
-        ];
-        let rest = if first_text.len() > 2 { first_text[2..].to_string() } else { "".to_string() };
+        let mut result = vec![Span::styled("- ", Style::default().fg(theme::ACCENT))];
+        let rest = if first_text.len() > 2 {
+            first_text[2..].to_string()
+        } else {
+            "".to_string()
+        };
         if !rest.is_empty() {
             result.push(Span::styled(rest, Style::default().fg(theme::FG)));
         }
@@ -1145,10 +1500,12 @@ fn apply_list_style(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
 
     // * 列表项
     if trimmed.starts_with("* ") {
-        let mut result = vec![
-            Span::styled("* ", Style::default().fg(theme::ACCENT)),
-        ];
-        let rest = if first_text.len() > 2 { first_text[2..].to_string() } else { "".to_string() };
+        let mut result = vec![Span::styled("* ", Style::default().fg(theme::ACCENT))];
+        let rest = if first_text.len() > 2 {
+            first_text[2..].to_string()
+        } else {
+            "".to_string()
+        };
         if !rest.is_empty() {
             result.push(Span::styled(rest, Style::default().fg(theme::FG)));
         }
@@ -1162,9 +1519,10 @@ fn apply_list_style(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
             if dot_pos <= 2 {
                 let num_part = &trimmed[..dot_pos + 1];
                 let rest_text = trimmed[dot_pos + 1..].trim_start().to_string();
-                let mut result = vec![
-                    Span::styled(format!("{} ", num_part), Style::default().fg(theme::ACCENT)),
-                ];
+                let mut result = vec![Span::styled(
+                    format!("{} ", num_part),
+                    Style::default().fg(theme::ACCENT),
+                )];
                 if !rest_text.is_empty() {
                     result.push(Span::styled(rest_text, Style::default().fg(theme::FG)));
                 }
@@ -1196,9 +1554,12 @@ fn parse_content_with_thinking_opencode(content: &str, term_width: u16) -> Vec<L
             }
             normal_content.clear();
 
-            lines.push(Line::from(vec![
-                Span::styled("+ Thought", Style::default().fg(theme::ORANGE).add_modifier(Modifier::BOLD)),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                "+ Thought",
+                Style::default()
+                    .fg(theme::ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            )]));
         } else {
             for md_line in parse_markdown_owned(&normal_content, term_width) {
                 lines.push(md_line);
@@ -1206,7 +1567,12 @@ fn parse_content_with_thinking_opencode(content: &str, term_width: u16) -> Vec<L
             normal_content.clear();
 
             lines.push(Line::from(vec![
-                Span::styled("+ Thought", Style::default().fg(theme::ORANGE).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "+ Thought",
+                    Style::default()
+                        .fg(theme::ORANGE)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ...", Style::default().fg(theme::FG_DIM)),
             ]));
             break;
@@ -1237,15 +1603,15 @@ fn find_thinking_start(text: &str) -> Option<usize> {
 /// 查找 thinking 块结束位置（从起始标签开始，返回结束标签后的偏移）
 fn find_thinking_end(text_from_start: &str) -> Option<usize> {
     // <think>...</think>
-    if text_from_start.starts_with("<think>") {
-        if let Some(idx) = text_from_start[7..].find("</think>") {
-            return Some(7 + idx + 8);
+    if let Some(content) = text_from_start.strip_prefix("<think>") {
+        if let Some(idx) = content.find("</think>") {
+            return Some("<think>".len() + idx + "</think>".len());
         }
     }
     // 🔍...ConstraintMaker
-    if text_from_start.starts_with("🔍") {
-        if let Some(idx) = text_from_start[7..].find("ConstraintMaker") {
-            return Some(7 + idx + 8);
+    if let Some(content) = text_from_start.strip_prefix("🔍") {
+        if let Some(idx) = content.find("ConstraintMaker") {
+            return Some("🔍".len() + idx + "ConstraintMaker".len());
         }
     }
     None
@@ -1253,13 +1619,19 @@ fn find_thinking_end(text_from_start: &str) -> Option<usize> {
 
 /// 提取 thinking 内容
 fn get_thinking_content(text_from_start: &str, end_idx: usize) -> String {
-    if text_from_start.starts_with("<think>") {
-        text_from_start[7..end_idx - 8].trim().to_string()
+    let (prefix, suffix) = if text_from_start.starts_with("<think>") {
+        ("<think>", "</think>")
     } else if text_from_start.starts_with("🔍") {
-        text_from_start[7..end_idx - 8].trim().to_string()
+        ("🔍", "ConstraintMaker")
     } else {
-        String::new()
-    }
+        return String::new();
+    };
+    text_from_start
+        .strip_prefix(prefix)
+        .and_then(|content| content.get(..end_idx.saturating_sub(prefix.len() + suffix.len())))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1267,43 +1639,62 @@ fn get_thinking_content(text_from_start: &str, end_idx: usize) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn is_table_line(trimmed: &str) -> bool {
-    if !trimmed.starts_with('|') { return false; }
-    if trimmed.ends_with('|') { return true; }
+    if !trimmed.starts_with('|') {
+        return false;
+    }
+    if trimmed.ends_with('|') {
+        return true;
+    }
     trimmed.split('|').filter(|s| !s.is_empty()).count() >= 2
 }
 
 fn is_setext_underline(trimmed: &str) -> bool {
-    if trimmed.len() < 3 { return false; }
+    if trimmed.len() < 3 {
+        return false;
+    }
     let first = trimmed.chars().next().unwrap();
-    if first != '=' && first != '-' { return false; }
+    if first != '=' && first != '-' {
+        return false;
+    }
     trimmed.chars().all(|c| c == first)
 }
 
 fn detect_header(line: &str) -> Option<usize> {
     let mut count = 0;
     for ch in line.chars() {
-        if ch == '#' { count += 1; }
-        else if ch.is_whitespace() {
-            if count > 0 && count <= 6 { return Some(count); }
+        if ch == '#' {
+            count += 1;
+        } else if ch.is_whitespace() {
+            if count > 0 && count <= 6 {
+                return Some(count);
+            }
             return None;
-        } else { return None; }
+        } else {
+            return None;
+        }
     }
     None
 }
 
 fn parse_table_row(line: &str) -> Vec<String> {
     let trimmed = line.trim();
-    if trimmed == "|" { return vec![]; }
-    let inner = if trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len().saturating_sub(0) >= 2 {
-        &trimmed[1..trimmed.len().saturating_sub(1)]
-    } else if trimmed.starts_with('|') {
-        &trimmed[1..]
+    if trimmed == "|" {
+        return vec![];
+    }
+    let inner = if trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() >= 2 {
+        trimmed
+            .strip_prefix('|')
+            .and_then(|value| value.strip_suffix('|'))
+            .unwrap_or(trimmed)
+    } else if let Some(value) = trimmed.strip_prefix('|') {
+        value
     } else if trimmed.ends_with('|') {
         &trimmed[..trimmed.len().saturating_sub(1)]
     } else {
         trimmed
     };
-    inner.split('|')
+    inner
+        .split('|')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
@@ -1327,8 +1718,13 @@ fn render_table(lines: &[&str]) -> Vec<Line<'static>> {
         return result;
     }
 
-    let data_start = if lines.len() > 1 && lines[1].contains("---") { 2 } else { 1 };
-    let data_rows: Vec<Vec<String>> = lines[data_start..].iter()
+    let data_start = if lines.len() > 1 && lines[1].contains("---") {
+        2
+    } else {
+        1
+    };
+    let data_rows: Vec<Vec<String>> = lines[data_start..]
+        .iter()
         .map(|l| parse_table_row(l))
         .collect();
 
@@ -1352,7 +1748,7 @@ fn render_table(lines: &[&str]) -> Vec<Line<'static>> {
         }
         header_spans.push(Span::styled(
             format!("{:<width$}", header, width = col_widths[i]),
-            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ));
     }
     header_spans.push(Span::styled(" │", Style::default().fg(theme::FG_MUTED)));
@@ -1360,11 +1756,14 @@ fn render_table(lines: &[&str]) -> Vec<Line<'static>> {
 
     // 分隔线
     let mut sep_spans = vec![Span::styled("├─", Style::default().fg(theme::FG_MUTED))];
-    for i in 0..num_cols {
+    for (i, width) in col_widths.iter().enumerate().take(num_cols) {
         if i > 0 {
             sep_spans.push(Span::styled("─┼─", Style::default().fg(theme::FG_MUTED)));
         }
-        sep_spans.push(Span::styled("─".repeat(col_widths[i]), Style::default().fg(theme::FG_MUTED)));
+        sep_spans.push(Span::styled(
+            "─".repeat(*width),
+            Style::default().fg(theme::FG_MUTED),
+        ));
     }
     sep_spans.push(Span::styled("─┤", Style::default().fg(theme::FG_MUTED)));
     result.push(Line::from(sep_spans));
@@ -1377,8 +1776,16 @@ fn render_table(lines: &[&str]) -> Vec<Line<'static>> {
                 row_spans.push(Span::styled(" │ ", Style::default().fg(theme::FG_MUTED)));
             }
             row_spans.push(Span::styled(
-                format!("{:<width$}", cell, width = if i < col_widths.len() { col_widths[i] } else { cell.len() }),
-                Style::default().fg(theme::FG)
+                format!(
+                    "{:<width$}",
+                    cell,
+                    width = if i < col_widths.len() {
+                        col_widths[i]
+                    } else {
+                        cell.len()
+                    }
+                ),
+                Style::default().fg(theme::FG),
             ));
         }
         row_spans.push(Span::styled(" │", Style::default().fg(theme::FG_MUTED)));
@@ -1403,11 +1810,16 @@ fn parse_inline_markdown_owned(text: &str) -> Vec<Span<'static>> {
             if let Some(end) = remaining.find('`') {
                 spans.push(Span::styled(
                     remaining[..end].to_string(),
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 remaining = &remaining[end + 1..];
             } else {
-                spans.push(Span::styled(format!("`{}", remaining), Style::default().fg(theme::FG)));
+                spans.push(Span::styled(
+                    format!("`{}", remaining),
+                    Style::default().fg(theme::FG),
+                ));
                 break;
             }
             continue;
@@ -1417,7 +1829,10 @@ fn parse_inline_markdown_owned(text: &str) -> Vec<Span<'static>> {
     }
 
     if spans.is_empty() {
-        spans.push(Span::styled(text.to_string(), Style::default().fg(theme::FG)));
+        spans.push(Span::styled(
+            text.to_string(),
+            Style::default().fg(theme::FG),
+        ));
     }
     spans
 }
@@ -1429,21 +1844,30 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
     while !remaining.is_empty() {
         if let Some(start) = remaining.find("**") {
             if start > 0 {
-                spans.push(Span::styled(remaining[..start].to_string(), Style::default().fg(theme::FG)));
+                spans.push(Span::styled(
+                    remaining[..start].to_string(),
+                    Style::default().fg(theme::FG),
+                ));
             }
             remaining = &remaining[start + 2..];
             if let Some(end) = remaining.find("**") {
                 spans.push(Span::styled(
                     remaining[..end].to_string(),
-                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
                 ));
                 remaining = &remaining[end + 2..];
             } else {
-                spans.push(Span::styled(format!("**{}", remaining), Style::default().fg(theme::FG)));
+                spans.push(Span::styled(
+                    format!("**{}", remaining),
+                    Style::default().fg(theme::FG),
+                ));
                 break;
             }
         } else {
-            spans.push(Span::styled(remaining.to_string(), Style::default().fg(theme::FG)));
+            spans.push(Span::styled(
+                remaining.to_string(),
+                Style::default().fg(theme::FG),
+            ));
             break;
         }
     }
@@ -1462,12 +1886,16 @@ fn calculate_scroll(area: Rect, lines: &[Line], app: &App) -> u16 {
     if app.manual_scroll {
         let bottom_scroll = if total_lines > visible_lines {
             total_lines.saturating_sub(visible_lines)
-        } else { 0 };
+        } else {
+            0
+        };
         bottom_scroll.saturating_sub(app.scroll_offset)
     } else {
         if total_lines > visible_lines {
             total_lines.saturating_sub(visible_lines)
-        } else { 0 }
+        } else {
+            0
+        }
     }
 }
 
@@ -1475,7 +1903,12 @@ fn calculate_scroll(area: Rect, lines: &[Line], app: &App) -> u16 {
 //  键盘事件处理
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mpsc::UnboundedSender<AppEvent>) -> bool {
+fn handle_welcome_key(
+    app: &mut App,
+    key: KeyEvent,
+    _sse: &SseClient,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.should_quit = true;
         return false;
@@ -1502,13 +1935,13 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: 
     }
     if key.code == KeyCode::Enter {
         let text = app.get_input_text().trim().to_string();
-        if text.is_empty() { return false; }
+        if text.is_empty() {
+            return false;
+        }
 
-        if text.starts_with('/') {
-            if app.handle_slash_command(&text) {
-                app.clear_input();
-                return false;
-            }
+        if text.starts_with('/') && app.handle_slash_command(&text) {
+            app.clear_input();
+            return false;
         }
 
         app.send_message(text.clone());
@@ -1526,7 +1959,7 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: 
                 match sse.create_session(&agent_id, &user_id).await {
                     Ok(id) => {
                         let session_id_str: String = id;
-                        let _ = tx.send(AppEvent::SseEvent(ReActEvent {
+                        let _ = tx.send(AppEvent::SseEvent(Box::new(ReActEvent {
                             event: "_session_created".to_string(),
                             content: Some(session_id_str.clone()),
                             tool_call_id: None,
@@ -1541,7 +1974,8 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: 
                             timeout_ms: None,
                             step_info: None,
                             change_summary: None,
-                        }));
+                            permission: None,
+                        })));
                         session_id_str
                     }
                     Err(e) => {
@@ -1549,19 +1983,43 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: 
                         return;
                     }
                 }
-            } else { session_id };
-            let _ = sse.chat_stream(&agent_id, &user_id, &sid, &text, project_context).await;
+            } else {
+                session_id
+            };
+            let _ = sse
+                .chat_stream(&agent_id, &user_id, &sid, &text, project_context)
+                .await;
         });
 
         return true;
     }
-    if key.code == KeyCode::Backspace { app.backspace(); return false; }
-    if key.code == KeyCode::Delete { app.delete_char(); return false; }
-    if key.code == KeyCode::Left { app.cursor_left(); return false; }
-    if key.code == KeyCode::Right { app.cursor_right(); return false; }
-    if key.code == KeyCode::Home { app.cursor_home(); return false; }
-    if key.code == KeyCode::End { app.cursor_end(); return false; }
-    if key.code == KeyCode::Tab { return false; }
+    if key.code == KeyCode::Backspace {
+        app.backspace();
+        return false;
+    }
+    if key.code == KeyCode::Delete {
+        app.delete_char();
+        return false;
+    }
+    if key.code == KeyCode::Left {
+        app.cursor_left();
+        return false;
+    }
+    if key.code == KeyCode::Right {
+        app.cursor_right();
+        return false;
+    }
+    if key.code == KeyCode::Home {
+        app.cursor_home();
+        return false;
+    }
+    if key.code == KeyCode::End {
+        app.cursor_end();
+        return false;
+    }
+    if key.code == KeyCode::Tab {
+        return false;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
         app.command_palette_open = !app.command_palette_open;
         if app.command_palette_open {
@@ -1570,7 +2028,9 @@ fn handle_welcome_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: 
         }
         return false;
     }
-    if let KeyCode::Char(c) = key.code { app.insert_char(c); }
+    if let KeyCode::Char(c) = key.code {
+        app.insert_char(c);
+    }
     false
 }
 
@@ -1586,7 +2046,12 @@ const COMMAND_PALETTE_ITEMS: &[(&str, &str)] = &[
     ("/quit", "Exit WaLiCode CLI"),
 ];
 
-fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mpsc::UnboundedSender<AppEvent>) {
+fn handle_chat_key(
+    app: &mut App,
+    key: KeyEvent,
+    _sse: &SseClient,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
     // 命令面板模式
     if app.command_palette_open {
         let items: &[(&str, &str)] = COMMAND_PALETTE_ITEMS;
@@ -1596,7 +2061,8 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
             }
             KeyCode::Enter => {
                 let selected = app.command_palette_selection;
-                let filtered: Vec<_> = items.iter()
+                let filtered: Vec<_> = items
+                    .iter()
                     .filter(|(cmd, _)| cmd.contains(&app.command_palette_filter))
                     .collect();
                 if selected < filtered.len() {
@@ -1606,7 +2072,8 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
                 }
             }
             KeyCode::Up => {
-                let filtered_count = items.iter()
+                let filtered_count = items
+                    .iter()
                     .filter(|(cmd, _)| cmd.contains(&app.command_palette_filter))
                     .count();
                 if filtered_count > 0 {
@@ -1618,11 +2085,13 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
                 }
             }
             KeyCode::Down => {
-                let filtered_count = items.iter()
+                let filtered_count = items
+                    .iter()
                     .filter(|(cmd, _)| cmd.contains(&app.command_palette_filter))
                     .count();
                 if filtered_count > 0 {
-                    app.command_palette_selection = (app.command_palette_selection + 1) % filtered_count;
+                    app.command_palette_selection =
+                        (app.command_palette_selection + 1) % filtered_count;
                 }
             }
             KeyCode::Backspace => {
@@ -1646,7 +2115,9 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
     if key.code == KeyCode::Esc {
         if app.is_streaming {
             app.is_streaming = false;
-            app.messages.push(Message::System { text: "Cancelled".to_string() });
+            app.messages.push(Message::System {
+                text: "Cancelled".to_string(),
+            });
         } else {
             app.manual_scroll = false;
             app.scroll_offset = 0;
@@ -1737,7 +2208,8 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
         let text = app.get_input_text();
         let trimmed = text.trim();
         if trimmed.starts_with('/') {
-            let matching: Vec<_> = COMMAND_PALETTE_ITEMS.iter()
+            let matching: Vec<_> = COMMAND_PALETTE_ITEMS
+                .iter()
                 .map(|(cmd, _)| *cmd)
                 .filter(|cmd| cmd.starts_with(trimmed))
                 .collect();
@@ -1753,7 +2225,11 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
         let (line, col) = app.cursor_pos;
         if line < app.input_lines.len() && col > 0 {
             let content = &app.input_lines[line];
-            let word_start = content[..col].trim_end().rfind(' ').map(|i| i + 1).unwrap_or(0);
+            let word_start = content[..col]
+                .trim_end()
+                .rfind(' ')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             app.input_lines[line] = content[..word_start].to_string() + &content[col..];
             app.cursor_pos.1 = word_start;
         }
@@ -1769,7 +2245,9 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
         }
         KeyCode::PageDown => {
             app.scroll_offset = app.scroll_offset.saturating_sub(10);
-            if app.scroll_offset == 0 { app.manual_scroll = false; }
+            if app.scroll_offset == 0 {
+                app.manual_scroll = false;
+            }
             return;
         }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1779,13 +2257,17 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
             app.scroll_offset = app.scroll_offset.saturating_sub(3);
-            if app.scroll_offset == 0 { app.manual_scroll = false; }
+            if app.scroll_offset == 0 {
+                app.manual_scroll = false;
+            }
             return;
         }
         _ => {}
     }
 
-    if app.is_streaming { return; }
+    if app.is_streaming {
+        return;
+    }
 
     // ↑↓ 输入历史（仅在首行/末行触发）
     if key.code == KeyCode::Up && !key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -1794,7 +2276,9 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
             if let Some(prev) = app.input_history.navigate_up(&app.get_input_text()) {
                 app.set_input_text(prev);
             }
-        } else { app.cursor_up(); }
+        } else {
+            app.cursor_up();
+        }
         return;
     }
     if key.code == KeyCode::Down && !key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -1803,14 +2287,28 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
             if let Some(next) = app.input_history.navigate_down() {
                 app.set_input_text(next);
             }
-        } else { app.cursor_down(); }
+        } else {
+            app.cursor_down();
+        }
         return;
     }
 
-    if key.code == KeyCode::Left { app.cursor_left(); return; }
-    if key.code == KeyCode::Right { app.cursor_right(); return; }
-    if key.code == KeyCode::Home { app.cursor_home(); return; }
-    if key.code == KeyCode::End { app.cursor_end(); return; }
+    if key.code == KeyCode::Left {
+        app.cursor_left();
+        return;
+    }
+    if key.code == KeyCode::Right {
+        app.cursor_right();
+        return;
+    }
+    if key.code == KeyCode::Home {
+        app.cursor_home();
+        return;
+    }
+    if key.code == KeyCode::End {
+        app.cursor_end();
+        return;
+    }
 
     if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
         app.insert_newline();
@@ -1819,10 +2317,12 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
 
     if key.code == KeyCode::Enter {
         let text = app.get_input_text().trim().to_string();
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
 
-        if text.starts_with('/') {
-            if app.handle_slash_command(&text) { return; }
+        if text.starts_with('/') && app.handle_slash_command(&text) {
+            return;
         }
 
         app.send_message(text.clone());
@@ -1840,7 +2340,7 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
                 match sse.create_session(&agent_id, &user_id).await {
                     Ok(id) => {
                         let session_id_str: String = id;
-                        let _ = tx.send(AppEvent::SseEvent(ReActEvent {
+                        let _ = tx.send(AppEvent::SseEvent(Box::new(ReActEvent {
                             event: "_session_created".to_string(),
                             content: Some(session_id_str.clone()),
                             tool_call_id: None,
@@ -1855,7 +2355,8 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
                             timeout_ms: None,
                             step_info: None,
                             change_summary: None,
-                        }));
+                            permission: None,
+                        })));
                         session_id_str
                     }
                     Err(e) => {
@@ -1863,16 +2364,28 @@ fn handle_chat_key(app: &mut App, key: KeyEvent, _sse: &SseClient, event_tx: &mp
                         return;
                     }
                 }
-            } else { session_id };
-            let _ = sse.chat_stream(&agent_id, &user_id, &sid, &text, project_context).await;
+            } else {
+                session_id
+            };
+            let _ = sse
+                .chat_stream(&agent_id, &user_id, &sid, &text, project_context)
+                .await;
         });
 
         return;
     }
 
-    if key.code == KeyCode::Backspace { app.backspace(); return; }
-    if key.code == KeyCode::Delete { app.delete_char(); return; }
-    if let KeyCode::Char(c) = key.code { app.insert_char(c); }
+    if key.code == KeyCode::Backspace {
+        app.backspace();
+        return;
+    }
+    if key.code == KeyCode::Delete {
+        app.delete_char();
+        return;
+    }
+    if let KeyCode::Char(c) = key.code {
+        app.insert_char(c);
+    }
 }
 
 fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
@@ -1883,7 +2396,9 @@ fn handle_mouse_event(app: &mut App, mouse: MouseEvent) {
         }
         MouseEventKind::ScrollDown => {
             app.scroll_offset = app.scroll_offset.saturating_sub(3);
-            if app.scroll_offset == 0 { app.manual_scroll = false; }
+            if app.scroll_offset == 0 {
+                app.manual_scroll = false;
+            }
         }
         _ => {}
     }

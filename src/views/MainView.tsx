@@ -78,6 +78,23 @@ export function MainView() {
 
   const { colors } = useThemeStore()
   const showHistoryPanel = useAgentStore((s) => s.showHistoryPanel)
+  const currentSessionId = useAgentStore((s) => s.currentSessionId)
+  const currentSessionTargetType = useAgentStore((s) => {
+    const session = s.currentSessionId ? s.sessions.get(s.currentSessionId) : null
+    return session?.executionTargetType ?? null
+  })
+  const setExecutionTarget = useAgentStore((s) => s.setExecutionTarget)
+  const localRootPath = useLocalFileStore((s) => s.rootPath)
+
+  // Bind a restored, currently unbound chat to the project opened in the
+  // desktop file tree. New chats are bound during createServerSession.
+  useEffect(() => {
+    if (!currentSessionId || !localRootPath || currentSessionTargetType !== null) return
+    void setExecutionTarget(currentSessionId, { type: 'LOCAL', reference: localRootPath }).catch((error) => {
+      console.warn('[WaLiCode] failed to bind opened local project to chat session:', error)
+    })
+  }, [currentSessionId, currentSessionTargetType, localRootPath, setExecutionTarget])
+
   const { 
     openTabs, 
     activeTabKey, 

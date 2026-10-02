@@ -8,7 +8,7 @@
 import { create } from 'zustand'
 import { chatConfig } from '../config/chat'
 
-export type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'disconnected' | 'error'
+export type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'reconnecting' | 'disconnected' | 'stopped' | 'error'
 
 export interface StreamState {
   /** 当前连接状态 */

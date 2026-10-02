@@ -9,7 +9,19 @@ echo   WaLiSSH 开发环境启动
 echo ========================================
 echo.
 
-cd /d "%~dp0\..\"
+REM 脚本位于 docs\dev-ops，客户端根目录需要向上两级。
+cd /d "%~dp0\..\..\"
+if errorlevel 1 (
+    echo 错误: 无法切换到客户端根目录
+    pause
+    exit /b 1
+)
+
+if not exist "package.json" (
+    echo 错误: 当前目录不是 WaLiCode 客户端根目录: %CD%
+    pause
+    exit /b 1
+)
 
 REM 检查 Node.js
 where node >nul 2>nul
@@ -39,7 +51,12 @@ if %errorlevel% neq 0 (
 REM 安装依赖（如果 node_modules 不存在）
 if not exist "node_modules" (
     echo 📦 正在安装依赖...
-    call npm install
+    call npm ci
+    if errorlevel 1 (
+        echo 错误: npm 依赖安装失败
+        pause
+        exit /b 1
+    )
 )
 
 echo.
@@ -50,6 +67,9 @@ echo ========================================
 echo.
 
 REM 启动 Tauri 开发环境
-npm run tauri dev
+call npm run tauri dev
+if errorlevel 1 (
+    echo 错误: Tauri 开发环境启动失败，退出码 %errorlevel%
+)
 
 pause

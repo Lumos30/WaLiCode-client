@@ -7,7 +7,7 @@
  */
 import { memo, useState, useMemo, useCallback } from 'react'
 import { useThemeStore } from '../stores/themeStore'
-import { useAiPatchStore, type AiPatchPreview } from '../stores/aiPatchStore'
+import { canSafelyRevertAiPatch, useAiPatchStore, type AiPatchPreview } from '../stores/aiPatchStore'
 import { useLocalFileStore } from '../stores/localFileStore'
 import { useFileExplorerStore } from '../stores/fileExplorerStore'
 import { InlineDiff } from './InlineDiff'
@@ -31,6 +31,7 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
   const fileName = sep >= 0 ? preview.path.substring(sep + 1) : preview.path
   const dirPath = sep >= 0 ? preview.path.substring(0, sep + 1) : ''
   const isRemote = preview.target === 'remote'
+  const canRevert = canSafelyRevertAiPatch(preview)
   // 变更类型
   const changeKind = useMemo(() => {
     if (preview.removedLines === 0 && preview.addedLines > 0) return { text: '新增', color: '#22c55e' }
@@ -55,21 +56,25 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
   }, [preview.id, removePreview])
 
   const handleRevert = useCallback(async () => {
+    if (!canRevert) return
     setReverting(true)
     try {
+      let restored = false
       if (preview.target === 'local') {
-        await useLocalFileStore.getState().restoreFileContent(preview.path, preview.beforeContent)
+        restored = await useLocalFileStore.getState().restoreFileContent(preview.path, preview.beforeContent)
       } else if (preview.target === 'remote' && preview.connectionId) {
-        await useFileExplorerStore.getState().restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
+        restored = await useFileExplorerStore.getState().restoreFileContent(preview.connectionId, preview.path, preview.beforeContent)
       }
-      removePreview(preview.id)
-      setStatus('reverted')
+      if (restored) {
+        removePreview(preview.id)
+        setStatus('reverted')
+      }
     } catch (e) {
       console.error('[ArtifactSummaryPanel] Revert 失败:', e)
     } finally {
       setReverting(false)
     }
-  }, [preview, removePreview])
+  }, [preview, canRevert, removePreview])
 
   // 已处理态
   if (status !== 'pending') {
@@ -151,14 +156,14 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
         </button>
         <button
           onClick={(e) => { e.stopPropagation(); handleRevert() }}
-          disabled={reverting}
+          disabled={reverting || !canRevert}
           className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium transition-all hover:opacity-80 disabled:opacity-50 flex-shrink-0"
           style={{
             backgroundColor: 'rgba(239,68,68,0.10)',
             color: '#ef4444',
             border: '1px solid rgba(239,68,68,0.20)',
           }}
-          title="回退变更"
+          title={canRevert ? '回退变更' : '修改前内容未捕获，不能安全回退'}
         >
           ✕
         </button>
@@ -190,6 +195,11 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
         <div className="animate-in slide-in-from-top-1 duration-200">
           <div style={{ borderTop: `1px solid ${colors.border}30` }} />
           <div className="px-2 py-2">
+            {!canRevert && (
+              <p className="px-1 pb-2 text-[10px]" style={{ color: '#f59e0b' }}>
+                修改前内容未捕获，此 Diff 仅供查看，不能安全回退。
+              </p>
+            )}
             <InlineDiff
               beforeContent={preview.beforeContent}
               afterContent={preview.afterContent}
@@ -201,11 +211,11 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
             <div className="flex items-center gap-2">
               <button
                 onClick={(e) => { e.stopPropagation(); handleRevert() }}
-                disabled={reverting}
+                disabled={reverting || !canRevert}
                 className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-all hover:opacity-80 disabled:opacity-50"
                 style={{ backgroundColor: 'rgba(239,68,68,0.10)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)' }}
               >
-                {reverting ? '⏳' : '↩️'} 回退
+                {reverting ? '⏳ 回退中' : canRevert ? '↩️ 回退' : '无法安全回退'}
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); handleAccept() }}
@@ -226,6 +236,7 @@ const ArtifactFileRow = memo(function ArtifactFileRow({
     && prev.preview.removedLines === next.preview.removedLines
     && prev.preview.beforeContent === next.preview.beforeContent
     && prev.preview.afterContent === next.preview.afterContent
+    && prev.preview.hasBeforeContent === next.preview.hasBeforeContent
     && prev.colors === next.colors
 })
 
@@ -238,6 +249,7 @@ export const ArtifactSummaryPanel = memo(function ArtifactSummaryPanel() {
 
   // 只显示 pending 状态的预览（已 accepted/reverted 的不在此面板处理，由子组件自己管）
   const pendingPreviews = previews
+  const revertiblePendingPreviews = pendingPreviews.filter(canSafelyRevertAiPatch)
 
   // ⚠️ Hook 规则：useCallback 必须在条件 return 之前调用
   // 全部接受
@@ -250,20 +262,23 @@ export const ArtifactSummaryPanel = memo(function ArtifactSummaryPanel() {
 
   // 全部回退
   const handleRevertAll = useCallback(async () => {
-    if (pendingPreviews.length === 0) return
-    for (const p of pendingPreviews) {
+    if (revertiblePendingPreviews.length === 0) return
+    for (const p of revertiblePendingPreviews) {
       try {
+        let restored = false
         if (p.target === 'local') {
-          await useLocalFileStore.getState().restoreFileContent(p.path, p.beforeContent)
+          restored = await useLocalFileStore.getState().restoreFileContent(p.path, p.beforeContent)
         } else if (p.target === 'remote' && p.connectionId) {
-          await useFileExplorerStore.getState().restoreFileContent(p.connectionId, p.path, p.beforeContent)
+          restored = await useFileExplorerStore.getState().restoreFileContent(p.connectionId, p.path, p.beforeContent)
         }
-        removePreview(p.id)
+        if (restored) {
+          removePreview(p.id)
+        }
       } catch (e) {
         console.error('[ArtifactSummaryPanel] Revert 失败:', p.path, e)
       }
     }
-  }, [pendingPreviews, removePreview])
+  }, [revertiblePendingPreviews, removePreview])
 
   // ⚠️ Hook 规则：所有 Hook 必须在条件 return 之前调用
   // pendingPreviews 为空时返回 null，但 Hook 数量必须与上一次渲染一致
@@ -324,15 +339,16 @@ export const ArtifactSummaryPanel = memo(function ArtifactSummaryPanel() {
           {/* 全部回退 */}
           <button
             onClick={(e) => { e.stopPropagation(); handleRevertAll() }}
-            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md transition-all hover:opacity-80"
+            disabled={revertiblePendingPreviews.length === 0}
+            className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md transition-all hover:opacity-80 disabled:opacity-50"
             style={{
               backgroundColor: 'rgba(239,68,68,0.10)',
               color: '#ef4444',
               border: '1px solid rgba(239,68,68,0.25)',
             }}
-            title="撤销全部变更"
+            title={revertiblePendingPreviews.length > 0 ? '撤销有可靠快照的变更' : '没有可安全回退的变更'}
           >
-            ✕ 全部撤销
+            ✕ 全部撤销{revertiblePendingPreviews.length < pendingPreviews.length ? ` (${revertiblePendingPreviews.length})` : ''}
           </button>
           {/* 展开箭头 */}
           <svg

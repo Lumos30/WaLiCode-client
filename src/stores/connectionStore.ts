@@ -165,8 +165,12 @@ export const useConnectionStore = create<ConnectionStore>((set, get) => ({
     })),
 
   setServerUrl: (url: string) => {
-    setRequestBaseUrl(url)
-    set({ serverUrl: url, serverStatus: { ...get().serverStatus, url } })
+    try {
+      const normalized = setRequestBaseUrl(url)
+      set({ serverUrl: normalized, serverStatus: { ...get().serverStatus, url: normalized }, error: null })
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : '服务端地址无效' })
+    }
   },
 
   clearError: () => set({ error: null }),

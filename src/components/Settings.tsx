@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useThemeStore, themes, type ThemeName } from '../stores/themeStore'
 import { useConnectionStore } from '../stores/connectionStore'
 import { invoke } from '@tauri-apps/api/core'
+import { getApiToken, setApiToken, getAuthHeaders, normalizeLocalServerUrl } from '../api/request'
 
 interface SettingsProps {
   open: boolean
@@ -16,11 +17,13 @@ export function Settings({ open, onClose }: SettingsProps) {
 
   // ── 各设置项的本地编辑状态 ──
   const [inputUrl, setInputUrl] = useState(serverUrl)
+  const [inputToken, setInputToken] = useState(getApiToken())
   const [inputLang, setInputLang] = useState('简体中文')
   const [inputFont, setInputFont] = useState('JetBrains Mono')
   const [inputFontSize, setInputFontSize] = useState(13)
   const [section, setSection] = useState<Section>('communication')
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'fail'>('idle')
+  const [serverUrlError, setServerUrlError] = useState<string | null>(null)
 
   // CLI 工具状态
   const [cliInstalled, setCliInstalled] = useState(false)
@@ -34,7 +37,7 @@ export function Settings({ open, onClose }: SettingsProps) {
   const dragStart = useRef({ x: 0, y: 0, w: 0, h: 0 })
 
   // 同步 store → 本地
-  useEffect(() => { setInputUrl(serverUrl) }, [serverUrl])
+  useEffect(() => { setInputUrl(serverUrl); setInputToken(getApiToken()) }, [serverUrl])
 
   // 检查 CLI 注册状态
   useEffect(() => {
@@ -42,15 +45,23 @@ export function Settings({ open, onClose }: SettingsProps) {
   }, [])
 
   // ── 判断是否有修改 ──
-  const hasChanges = inputUrl.trim().replace(/\/+$/, '') !== serverUrl
+  const hasChanges = inputUrl.trim().replace(/\/+$/, '') !== serverUrl || inputToken.trim() !== getApiToken()
 
   /** 测试连接 — 直接请求用户输入的地址，不依赖 store 状态 */
   const handleTest = useCallback(async () => {
-    const trimmed = inputUrl.trim().replace(/\/+$/, '')
-    if (!trimmed) return
+    let normalized: string
+    try {
+      normalized = normalizeLocalServerUrl(inputUrl)
+      setServerUrlError(null)
+    } catch (error) {
+      setServerUrlError(error instanceof Error ? error.message : '服务端地址无效')
+      setTestStatus('fail')
+      return
+    }
     setTestStatus('testing')
     try {
-      const res = await fetch(`${trimmed}/api/v1/ssh/connection_list?userId=default`, {
+      const res = await fetch(`${normalized}/api/v1/ssh/connection_list?userId=default`, {
+        headers: getAuthHeaders(undefined, inputToken),
         signal: AbortSignal.timeout(8000),
       })
       const json = await res.json()
@@ -59,24 +70,33 @@ export function Settings({ open, onClose }: SettingsProps) {
       setTestStatus('fail')
     }
     setTimeout(() => setTestStatus('idle'), 3000)
-  }, [inputUrl])
+  }, [inputUrl, inputToken])
 
   /** 保存所有设置 */
   const handleSave = useCallback(() => {
-    const trimmed = inputUrl.trim().replace(/\/+$/, '')
-    if (trimmed) setServerUrl(trimmed)
-  }, [inputUrl, setServerUrl])
+    try {
+      const normalized = normalizeLocalServerUrl(inputUrl)
+      setServerUrlError(null)
+      setServerUrl(normalized)
+      setInputUrl(normalized)
+    } catch (error) {
+      setServerUrlError(error instanceof Error ? error.message : '服务端地址无效')
+      return false
+    }
+    setApiToken(inputToken)
+    return true
+  }, [inputUrl, inputToken, setServerUrl])
 
   /** 取消：还原所有本地状态 */
   const handleCancel = useCallback(() => {
     setInputUrl(serverUrl)
+    setInputToken(getApiToken())
     onClose()
   }, [serverUrl, onClose])
 
   /** 保存并关闭 */
   const handleSaveAndClose = useCallback(() => {
-    handleSave()
-    onClose()
+    if (handleSave()) onClose()
   }, [handleSave, onClose])
 
   // ── 拖拽缩放逻辑 ──
@@ -209,7 +229,7 @@ export function Settings({ open, onClose }: SettingsProps) {
                     <input
                       type="text"
                       value={inputUrl}
-                      onChange={(e) => setInputUrl(e.target.value)}
+                      onChange={(e) => { setInputUrl(e.target.value); setServerUrlError(null) }}
                       placeholder="http://localhost:8091"
                       className="flex-1 px-3.5 py-2 rounded-md text-[13px] outline-none transition-colors"
                       style={{
@@ -231,7 +251,28 @@ export function Settings({ open, onClose }: SettingsProps) {
                       {testStatus === 'testing' ? '测试中...' : testStatus === 'success' ? '✓ 连接成功' : testStatus === 'fail' ? '✗ 连接失败' : '测试连接'}
                     </button>
                   </div>
-                  <p className="mt-1.5 text-[12px]" style={{ color: colors.textDim }}>后端 API 的完整地址，如 http://localhost:8091</p>
+                  <p className="mt-1.5 text-[12px]" style={{ color: serverUrlError ? colors.red : colors.textDim }}>
+                    {serverUrlError || '桌面版仅支持本机后端：http://localhost:8091 或 http://127.0.0.1:8091'}
+                  </p>
+                </div>
+
+                {/* API 认证令牌 */}
+                <div>
+                  <label className="block text-[13px] mb-2" style={{ color: colors.textDim }}>API Token</label>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={inputToken}
+                    onChange={(e) => setInputToken(e.target.value)}
+                    placeholder="至少 32 字节的 Bearer Token"
+                    className="w-full px-3.5 py-2 rounded-md text-[13px] outline-none transition-colors"
+                    style={{
+                      backgroundColor: colors.bgInput,
+                      border: `1px solid ${inputToken.trim() !== getApiToken() ? colors.accent : colors.border}`,
+                      color: colors.text,
+                    }}
+                  />
+                  <p className="mt-1.5 text-[12px]" style={{ color: colors.textDim }}>用于访问服务端 API；令牌只保存在本机设置中。</p>
                 </div>
 
                 {/* 语言 */}

@@ -18,12 +18,10 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use tauri::Emitter;
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize, MasterPty, Child};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 #[cfg(windows)]
 use encoding_rs::GBK;
-#[cfg(windows)]
-use encoding_rs_io::DecodeReaderBytesBuilder;
 
 lazy_static::lazy_static! {
     /// 活跃 PTY 会话注册表
@@ -114,7 +112,9 @@ pub async fn spawn_local_pty(
         cmd.env("TERM", "xterm-256color");
         cmd.env("SHELL", &shell);
 
-        let child = pty_pair.slave.spawn_command(cmd)
+        let child = pty_pair
+            .slave
+            .spawn_command(cmd)
             .map_err(|e| format!("Failed to spawn shell: {}", e))?;
 
         // ⚠️ 必须持有 slave 引用，否则 drop 后 shell 收到 SIGHUP 立即退出
@@ -128,7 +128,12 @@ pub async fn spawn_local_pty(
             .take_writer()
             .map_err(|e| format!("Failed to take PTY writer: {}", e))?;
 
-        let session = PtySession { master, slave, writer, child };
+        let session = PtySession {
+            master,
+            slave,
+            writer,
+            child,
+        };
 
         {
             let mut sessions = PTY_SESSIONS.lock().await;
@@ -158,15 +163,19 @@ pub async fn spawn_local_pty(
                         if child_exited {
                             let exit_code = {
                                 let mut sessions = PTY_SESSIONS.blocking_lock();
-                                sessions.get_mut(&sid)
+                                sessions
+                                    .get_mut(&sid)
                                     .and_then(|s| s.child.try_wait().ok().flatten())
                                     .map(|status| status.exit_code())
                                     .unwrap_or(0)
                             };
-                            let _ = app.emit("local-pty-exit", serde_json::json!({
-                                "session_id": sid,
-                                "exit_code": exit_code,
-                            }));
+                            let _ = app.emit(
+                                "local-pty-exit",
+                                serde_json::json!({
+                                    "session_id": sid,
+                                    "exit_code": exit_code,
+                                }),
+                            );
                             break;
                         }
                         // 子进程仍存活，继续读取（reader 可能恢复）
@@ -174,24 +183,17 @@ pub async fn spawn_local_pty(
                     }
                     Ok(n) => {
                         #[cfg(windows)]
-                        let data = {
-                            let mut decoder = DecodeReaderBytesBuilder::new()
-                                .encoding(Some(GBK))
-                                .build(&buf[..n]);
-                            let mut decoded = String::new();
-                            if decoder.read_to_string(&mut decoded).is_ok() {
-                                decoded
-                            } else {
-                                String::from_utf8_lossy(&buf[..n]).to_string()
-                            }
-                        };
+                        let data = decode_windows_output(&buf[..n]);
                         #[cfg(not(windows))]
                         let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                        let _ = app.emit("local-pty-output", serde_json::json!({
-                            "session_id": sid,
-                            "data": data,
-                        }));
+                        let _ = app.emit(
+                            "local-pty-output",
+                            serde_json::json!({
+                                "session_id": sid,
+                                "data": data,
+                            }),
+                        );
                     }
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::Interrupted {
@@ -205,10 +207,13 @@ pub async fn spawn_local_pty(
                                 }
                             };
                             if child_exited {
-                                let _ = app.emit("local-pty-exit", serde_json::json!({
-                                    "session_id": sid,
-                                    "exit_code": -1,
-                                }));
+                                let _ = app.emit(
+                                    "local-pty-exit",
+                                    serde_json::json!({
+                                        "session_id": sid,
+                                        "exit_code": -1,
+                                    }),
+                                );
                                 break;
                             }
                             // 子进程仍存活，继续读取
@@ -239,7 +244,9 @@ pub async fn spawn_local_pty(
         cmd.env("USERPROFILE", &home);
         cmd.env("TERM", "xterm-256color");
 
-        if shell_path.file_name().and_then(|s| s.to_str())
+        if shell_path
+            .file_name()
+            .and_then(|s| s.to_str())
             .map(|s| s.contains("powershell") || s.contains("pwsh"))
             .unwrap_or(false)
         {
@@ -247,7 +254,9 @@ pub async fn spawn_local_pty(
             cmd.env("PYTHONIOENCODING", "utf-8");
         }
 
-        let child = pty_pair.slave.spawn_command(cmd)
+        let child = pty_pair
+            .slave
+            .spawn_command(cmd)
             .map_err(|e| format!("Failed to spawn shell ({}): {}", shell_path.display(), e))?;
 
         // ⚠️ 必须持有 slave 引用，否则 drop 后 shell 退出
@@ -257,19 +266,36 @@ pub async fn spawn_local_pty(
         let reader = master
             .try_clone_reader()
             .map_err(|e| format!("Failed to clone PTY reader: {}", e))?;
-        let writer = master
+        let mut writer = master
             .take_writer()
             .map_err(|e| format!("Failed to take PTY writer: {}", e))?;
 
-        // Windows: 设置控制台编码为 UTF-8
+        // Windows: 设置控制台编码为 UTF-8。PowerShell 中不能使用 `>nul`：
+        // PowerShell 会把 nul 当作普通文件名并通过 Out-File 打开，产生乱码和错误。
         {
-            let _ = writer.write_all(b"chcp 65001 >nul\r\n");
-            let _ = writer.flush();
-            let _ = writer.write_all(b"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8\r\n");
+            let is_powershell = shell_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| {
+                    name.eq_ignore_ascii_case("powershell.exe")
+                        || name.eq_ignore_ascii_case("pwsh.exe")
+                })
+                .unwrap_or(false);
+            let init_command = if is_powershell {
+                b"chcp 65001 | Out-Null; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8\r\n".as_slice()
+            } else {
+                b"chcp 65001 >NUL\r\n".as_slice()
+            };
+            let _ = writer.write_all(init_command);
             let _ = writer.flush();
         }
 
-        let session = PtySession { master, slave, writer, child };
+        let session = PtySession {
+            master,
+            slave,
+            writer,
+            child,
+        };
 
         {
             let mut sessions = PTY_SESSIONS.lock().await;
@@ -297,36 +323,33 @@ pub async fn spawn_local_pty(
                         if child_exited {
                             let exit_code = {
                                 let mut sessions = PTY_SESSIONS.blocking_lock();
-                                sessions.get_mut(&sid)
+                                sessions
+                                    .get_mut(&sid)
                                     .and_then(|s| s.child.try_wait().ok().flatten())
                                     .map(|status| status.exit_code())
                                     .unwrap_or(0)
                             };
-                            let _ = app.emit("local-pty-exit", serde_json::json!({
-                                "session_id": sid,
-                                "exit_code": exit_code,
-                            }));
+                            let _ = app.emit(
+                                "local-pty-exit",
+                                serde_json::json!({
+                                    "session_id": sid,
+                                    "exit_code": exit_code,
+                                }),
+                            );
                             break;
                         }
                         continue;
                     }
                     Ok(n) => {
-                        let data = {
-                            let mut decoder = DecodeReaderBytesBuilder::new()
-                                .encoding(Some(GBK))
-                                .build(&buf[..n]);
-                            let mut decoded = String::new();
-                            if decoder.read_to_string(&mut decoded).is_ok() {
-                                decoded
-                            } else {
-                                String::from_utf8_lossy(&buf[..n]).to_string()
-                            }
-                        };
+                        let data = decode_windows_output(&buf[..n]);
 
-                        let _ = app.emit("local-pty-output", serde_json::json!({
-                            "session_id": sid,
-                            "data": data,
-                        }));
+                        let _ = app.emit(
+                            "local-pty-output",
+                            serde_json::json!({
+                                "session_id": sid,
+                                "data": data,
+                            }),
+                        );
                     }
                     Err(e) => {
                         if e.kind() != std::io::ErrorKind::Interrupted {
@@ -339,10 +362,13 @@ pub async fn spawn_local_pty(
                                 }
                             };
                             if child_exited {
-                                let _ = app.emit("local-pty-exit", serde_json::json!({
-                                    "session_id": sid,
-                                    "exit_code": -1,
-                                }));
+                                let _ = app.emit(
+                                    "local-pty-exit",
+                                    serde_json::json!({
+                                        "session_id": sid,
+                                        "exit_code": -1,
+                                    }),
+                                );
                                 break;
                             }
                             continue;
@@ -360,6 +386,14 @@ pub async fn spawn_local_pty(
     Ok(())
 }
 
+#[cfg(windows)]
+fn decode_windows_output(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => GBK.decode(bytes).0.into_owned(),
+    }
+}
+
 /// 写入数据到 PTY（用户按键、AI 命令等）
 #[tauri::command]
 pub async fn write_to_pty(session_id: String, data: String) -> Result<(), String> {
@@ -368,7 +402,8 @@ pub async fn write_to_pty(session_id: String, data: String) -> Result<(), String
         .get_mut(&session_id)
         .ok_or_else(|| format!("No PTY session found: {}", session_id))?;
 
-    session.writer
+    session
+        .writer
         .write_all(data.as_bytes())
         .map_err(|e| format!("Failed to write to PTY: {}", e))?;
     session.writer.flush().ok();
@@ -384,7 +419,8 @@ pub async fn resize_local_pty(session_id: String, cols: u16, rows: u16) -> Resul
         .get_mut(&session_id)
         .ok_or_else(|| format!("No PTY session found: {}", session_id))?;
 
-    session.master
+    session
+        .master
         .resize(PtySize {
             rows,
             cols,

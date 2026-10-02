@@ -3,8 +3,7 @@
  * 封装 fetch，统一处理响应格式和错误
  *
  * 默认行为（dev 模式）：baseUrl = ''，走 Vite proxy
- * 用户在设置中修改服务端地址后：直接使用用户指定的地址，绕过 proxy
- * 生产模式（Tauri）：直连用户配置的地址
+ * 生产模式（Tauri）：只连接受 CSP 允许的本机服务端
  */
 
 /** 后端统一响应结构 */
@@ -16,6 +15,48 @@ export interface ApiResponse<T = unknown> {
 
 /** 默认服务端地址 */
 const DEFAULT_SERVER_URL = 'http://localhost:8091'
+const API_TOKEN_STORAGE_KEY = 'walicode_api_token'
+const SERVER_URL_STORAGE_KEY = 'walissh_server_url'
+const LOCAL_BACKEND_ORIGINS = new Set([
+  'http://localhost:8091',
+  'http://127.0.0.1:8091',
+])
+
+export function normalizeLocalServerUrl(url: string): string {
+  const candidate = url.trim().replace(/\/+$/, '') || DEFAULT_SERVER_URL
+  let parsed: URL
+  try {
+    parsed = new URL(candidate)
+  } catch {
+    throw new Error('服务端地址必须是 http://localhost:8091 或 http://127.0.0.1:8091')
+  }
+  if (parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash
+    || !LOCAL_BACKEND_ORIGINS.has(parsed.origin)) {
+    throw new Error('当前桌面版只支持本机服务端：http://localhost:8091 或 http://127.0.0.1:8091')
+  }
+  return parsed.origin
+}
+
+// The launcher-provided token is authoritative for local development; saved
+// settings are the fallback for production builds and manually configured servers.
+let apiToken: string = (import.meta.env.VITE_WALICODE_API_TOKEN || localStorage.getItem(API_TOKEN_STORAGE_KEY) || '').trim()
+
+export function getApiToken(): string {
+  return apiToken
+}
+
+export function setApiToken(token: string): void {
+  apiToken = token.trim()
+  if (apiToken) localStorage.setItem(API_TOKEN_STORAGE_KEY, apiToken)
+  else localStorage.removeItem(API_TOKEN_STORAGE_KEY)
+}
+
+export function getAuthHeaders(headers?: HeadersInit, token: string = apiToken): Headers {
+  const result = new Headers(headers)
+  const trimmed = token.trim()
+  if (trimmed) result.set('Authorization', `Bearer ${trimmed}`)
+  return result
+}
 
 /**
  * 服务端基础地址
@@ -23,9 +64,16 @@ const DEFAULT_SERVER_URL = 'http://localhost:8091'
  * - 用户显式设置后覆盖为实际地址（直连）
  * - 生产模式从 localStorage 读取
  */
-let baseUrl: string = import.meta.env.DEV
-  ? ''
-  : (localStorage.getItem('walissh_server_url') || DEFAULT_SERVER_URL)
+function storedLocalServerUrl(): string {
+  try {
+    return normalizeLocalServerUrl(localStorage.getItem(SERVER_URL_STORAGE_KEY) || DEFAULT_SERVER_URL)
+  } catch {
+    localStorage.removeItem(SERVER_URL_STORAGE_KEY)
+    return DEFAULT_SERVER_URL
+  }
+}
+
+let baseUrl: string = import.meta.env.DEV ? '' : storedLocalServerUrl()
 
 /** 获取当前服务端地址（显示用，空字符串时返回默认值） */
 export function getBaseUrl(): string {
@@ -41,23 +89,37 @@ export function getBaseUrl(): string {
  *
  * 这样用户在设置页修改的地址才能真正生效
  */
-export function setBaseUrl(url: string): void {
-  const trimmed = url.trim().replace(/\/+$/, '')
+export function setBaseUrl(url: string): string {
+  const normalized = normalizeLocalServerUrl(url)
   if (import.meta.env.DEV) {
-    // dev 模式：只有用户明确设置了非默认地址才直连，否则走 proxy
-    baseUrl = (!trimmed || trimmed === DEFAULT_SERVER_URL) ? '' : trimmed
+    baseUrl = normalized === DEFAULT_SERVER_URL ? '' : normalized
   } else {
-    baseUrl = trimmed || DEFAULT_SERVER_URL
+    baseUrl = normalized
   }
-  if (trimmed && trimmed !== DEFAULT_SERVER_URL) {
-    localStorage.setItem('walissh_server_url', trimmed)
+  if (normalized !== DEFAULT_SERVER_URL) {
+    localStorage.setItem(SERVER_URL_STORAGE_KEY, normalized)
   } else {
-    localStorage.removeItem('walissh_server_url')
+    localStorage.removeItem(SERVER_URL_STORAGE_KEY)
   }
+  return normalized
 }
 
 /** 请求超时（毫秒） */
 const TIMEOUT_MS = 15000
+
+async function readApiResponse<T>(res: globalThis.Response): Promise<ApiResponse<T> | null> {
+  try {
+    const payload: unknown = await res.json()
+    if (payload && typeof payload === 'object'
+      && typeof (payload as ApiResponse<T>).code === 'string'
+      && typeof (payload as ApiResponse<T>).info === 'string') {
+      return payload as ApiResponse<T>
+    }
+  } catch {
+    // Non-JSON failures are normalized below using the HTTP status text.
+  }
+  return null
+}
 
 /**
  * 通用请求方法
@@ -84,16 +146,14 @@ async function request<T>(
   try {
     const res = await fetch(url, {
       method,
-      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      headers: getAuthHeaders(body ? { 'Content-Type': 'application/json' } : undefined),
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     })
 
-    if (!res.ok) {
-      return { code: String(res.status), info: res.statusText, data: null }
-    }
-
-    return (await res.json()) as ApiResponse<T>
+    const payload = await readApiResponse<T>(res)
+    if (payload) return payload
+    return { code: String(res.status), info: res.statusText || '请求失败', data: null }
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       return { code: 'TIMEOUT', info: '请求超时', data: null }
@@ -121,14 +181,14 @@ export async function postFormData<T>(path: string, formData: FormData, signal?:
   try {
     const res = await fetch(url, {
       method: 'POST',
+      headers: getAuthHeaders(),
       body: formData,
       signal,
     })
 
-    if (!res.ok) {
-      return { code: String(res.status), info: res.statusText, data: null }
-    }
-    return (await res.json()) as ApiResponse<T>
+    const payload = await readApiResponse<T>(res)
+    if (payload) return payload
+    return { code: String(res.status), info: res.statusText || '上传失败', data: null }
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       return { code: 'CANCELLED', info: '上传已取消', data: null }

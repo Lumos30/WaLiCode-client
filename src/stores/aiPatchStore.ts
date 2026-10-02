@@ -8,11 +8,18 @@ export interface AiPatchPreview {
   path: string
   connectionId?: string
   toolName: string
+  /** Whether beforeContent was captured before the tool changed the file. */
+  hasBeforeContent: boolean
   beforeContent: string
   afterContent: string
   addedLines: number
   removedLines: number
   createdAt: number
+}
+
+/** Empty content is a valid snapshot for a newly created file; only an uncaptured snapshot is unsafe. */
+export function canSafelyRevertAiPatch(preview: AiPatchPreview): boolean {
+  return preview.hasBeforeContent
 }
 
 interface AiPatchStore {
